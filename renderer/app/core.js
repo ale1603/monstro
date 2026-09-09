@@ -145,6 +145,49 @@ function applyMenuVisibility() {
   }
 }
 
+/* ============ plegado de secciones del sidebar (accesibilidad + orden) ============ */
+const SIDEBAR_COLLAPSE_KEY = "monstro:sidebar-collapsed";
+
+function loadCollapsedSections() {
+  try {
+    return new Set(JSON.parse(localStorage.getItem(SIDEBAR_COLLAPSE_KEY) || "[]"));
+  } catch {
+    return new Set();
+  }
+}
+
+function saveCollapsedSections(set) {
+  localStorage.setItem(SIDEBAR_COLLAPSE_KEY, JSON.stringify([...set]));
+}
+
+const collapsedSections = loadCollapsedSections();
+
+// Refleja collapsedSections en el DOM: clase en el grupo + aria-expanded en su cabecera.
+function applySidebarCollapse() {
+  for (const key of Object.keys(MENU_SECTIONS)) {
+    const btn = document.getElementById(MENU_SECTIONS[key].navId);
+    const group = btn?.closest(".nav-group");
+    if (!group) continue;
+    const collapsed = collapsedSections.has(key);
+    group.classList.toggle("collapsed", collapsed);
+    btn.setAttribute("aria-expanded", String(!collapsed));
+  }
+}
+
+function toggleSidebarSection(key) {
+  if (collapsedSections.has(key)) collapsedSections.delete(key);
+  else collapsedSections.add(key);
+  saveCollapsedSections(collapsedSections);
+  applySidebarCollapse();
+}
+
+// Un solo listener por cabecera de sección, generado desde MENU_SECTIONS (fuente única de verdad).
+function wireSidebarCollapse() {
+  for (const key of Object.keys(MENU_SECTIONS)) {
+    document.getElementById(MENU_SECTIONS[key].navId)?.addEventListener("click", () => toggleSidebarSection(key));
+  }
+}
+
 function timeAgo(iso) {
   const seconds = Math.max(1, (Date.now() - new Date(iso).getTime()) / 1000);
   const units = [[31536000, "a"], [2592000, "mes"], [604800, "sem"], [86400, "d"], [3600, "h"], [60, "min"]];

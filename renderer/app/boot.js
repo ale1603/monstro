@@ -428,6 +428,8 @@ $("#search").addEventListener("input", (event) => {
 document.querySelectorAll(".bucket[data-bucket]").forEach((btn) =>
   btn.addEventListener("click", () => switchBucket(btn.dataset.bucket)),
 );
+wireSidebarCollapse();
+applySidebarCollapse();
 $("#bucket-history").addEventListener("click", enterHistory);
 $("#bucket-milestones").addEventListener("click", () => enterMilestones("tasks"));
 $("#bucket-milestones-summary").addEventListener("click", () => enterMilestones("summary"));
