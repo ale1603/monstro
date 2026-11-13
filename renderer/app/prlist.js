@@ -10,8 +10,8 @@ function stateChip(pr) {
 function reviewChip(pr) {
   if (pr.state !== "OPEN") return "";
   switch (pr.reviewDecision) {
-    case "APPROVED": return `<span class="chip chip-approved">✓ ${t("Aprobada")}</span>`;
-    case "CHANGES_REQUESTED": return `<span class="chip chip-changes">± ${t("Cambios pedidos")}</span>`;
+    case "APPROVED": return `<span class="chip chip-approved">${icon("check")} ${t("Aprobada")}</span>`;
+    case "CHANGES_REQUESTED": return `<span class="chip chip-changes">${icon("file-diff")} ${t("Cambios pedidos")}</span>`;
     case "REVIEW_REQUIRED": return `<span class="chip chip-review">${t("Falta revisión")}</span>`;
     default: return "";
   }
@@ -29,14 +29,14 @@ function checksIcon(pr) {
   const rollup = pr.commits?.nodes?.[0]?.commit?.statusCheckRollup;
   if (!rollup) return "";
   const map = {
-    SUCCESS: ["✓", "checks-success", t("Checks en verde")],
-    FAILURE: ["✗", "checks-failure", t("Checks fallando")],
-    ERROR: ["✗", "checks-failure", t("Checks con error")],
-    PENDING: ["●", "checks-pending", t("Checks en curso")],
-    EXPECTED: ["●", "checks-pending", t("Checks esperados")],
+    SUCCESS: ["circle-check", "checks-success", t("Checks en verde")],
+    FAILURE: ["circle-x", "checks-failure", t("Checks fallando")],
+    ERROR: ["circle-x", "checks-failure", t("Checks con error")],
+    PENDING: ["circle-dot", "checks-pending", t("Checks en curso")],
+    EXPECTED: ["circle-dot", "checks-pending", t("Checks esperados")],
   };
-  const [icon, cls, title] = map[rollup.state] || ["", "", ""];
-  return icon ? `<span class="checks ${cls}" title="${title}">${icon}</span>` : "";
+  const [name, cls, title] = map[rollup.state] || ["", "", ""];
+  return name ? `<span class="checks ${cls}" title="${title}">${icon(name)}</span>` : "";
 }
 
 /** Avatares con tick verde de quienes han aprobado (estilo Bitbucket). */
@@ -57,10 +57,64 @@ function approvalFaces(pr) {
       ${shown.map((a) => `
         <span class="face">
           <img src="${esc(a.avatarUrl)}" alt="${esc(a.login)}" />
-          <span class="face-tick">✓</span>
+          <span class="face-tick">${icon("check")}</span>
         </span>`).join("")}
       ${extra > 0 ? `<span class="face face-more">+${extra}</span>` : ""}
     </span>`;
+}
+
+/* ---------- repo, sesión y conflictos de una fila ---------- */
+
+// Nombre del proyecto SIN el grupo, con su icono: la inicial sobre un color derivado del nombre, igual que
+// hace GitLab cuando el proyecto no tiene avatar.
+// ponytail: avatar real no — los uploads de un proyecto privado piden cookie de sesión, no el token, así que
+// la <img> daría 401; haría falta proxiarlos por main a dataURL.
+function repoPill(pr) {
+  const full = pr.repository?.nameWithOwner || state.repo || "";
+  const name = full.split("/").pop();
+  if (!name) return "";
+  let hash = 0;
+  for (const ch of name) hash = (hash * 31 + ch.charCodeAt(0)) % 360;
+  return `<span class="label-pill repo-pill" title="${esc(full)}"><span class="repo-ico" style="background:hsl(${hash} 55% 45%)">${esc(name[0].toUpperCase())}</span>${esc(name)}</span>`;
+}
+
+const prKey = (pr) => `${pr.repository?.nameWithOwner || state.repo}#${pr.number}`;
+const hasDrafts = (pr) => state.draftKeys.has(prKey(pr));
+
+// Sesión de agente enlazada con esta MR (el panel de Agents las cruza por proyecto + iid).
+function sessionFor(pr) {
+  const repo = pr.repository?.nameWithOwner || state.repo;
+  return (sessionsUi.data || []).find((s) =>
+    s.links.some((l) => (l.kind === "mr" || l.kind === "pr") && l.project === repo && l.iid === pr.number),
+  );
+}
+
+function sessionBadge(pr) {
+  const s = sessionFor(pr);
+  if (!s) return "";
+  // Solo el icono: el título de la sesión va en el tooltip para no comerle ancho al de la MR.
+  const label = s.review ? t("Review de un agente") : t("Agente");
+  return `<button class="pr-agent" data-session="${esc(s.sessionId)}" title="${esc(`${label}: ${s.title}`)}">${icon("bot")}</button>`;
+}
+
+const hasConflicts = (pr) => pr.state === "OPEN" && (pr.mergeable === "CONFLICTING" || pr.mergeStateStatus === "DIRTY");
+
+function conflictButton(pr) {
+  if (!hasConflicts(pr)) return "";
+  return `<button class="pr-fix" data-fix="${esc(pr.url)}">${icon("wrench")} ${t("Solucionar conflictos")}</button>`;
+}
+
+async function launchConflictFix(url, btn) {
+  btn.disabled = true;
+  try {
+    await window.monstro.sessionsLaunch(url, "conflicts");
+    toast(t("Agente abierto en Ghostty sobre un worktree de la rama"), "ok");
+    setTimeout(loadSessions, 4000);
+  } catch (err) {
+    toast(ipcMessage(err), "err");
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 function labelPills(pr) {
@@ -70,17 +124,6 @@ function labelPills(pr) {
 }
 
 /* ============ lista de PRs ============ */
-function bucketFilter(prs) {
-  const login = state.me?.login;
-  switch (state.bucket) {
-    case "mine": return prs.filter((p) => p.author?.login === login);
-    case "review":
-      return prs.filter((p) => (p.reviewRequests?.nodes || []).some((n) => n.requestedReviewer?.login === login));
-    case "draft": return prs.filter((p) => p.isDraft);
-    default: return prs;
-  }
-}
-
 function searchFilter(prs) {
   const q = state.search.trim().toLowerCase();
   if (!q) return prs;
@@ -90,18 +133,13 @@ function searchFilter(prs) {
 }
 
 function renderCounts() {
-  const open = state.openPrs;
-  const login = state.me?.login;
-  $("#count-open").textContent = open.length || "";
-  $("#count-mine").textContent = open.filter((p) => p.author?.login === login).length || "";
-  $("#count-review").textContent =
-    open.filter((p) => (p.reviewRequests?.nodes || []).some((n) => n.requestedReviewer?.login === login)).length || "";
-  $("#count-draft").textContent = open.filter((p) => p.isDraft).length || "";
+  $("#count-open").textContent = state.openPrs.length || "";
 }
 
 function renderList() {
   if (state.view !== "prs") return;
-  const prs = searchFilter(bucketFilter(state.prs));
+  // Las que tienen comentarios en borrador sin publicar, primero.
+  const prs = searchFilter(state.prs).slice().sort((a, b) => hasDrafts(b) - hasDrafts(a));
   if (state.loading) {
     list.innerHTML = `<div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div>`;
     return;
@@ -117,9 +155,10 @@ function renderList() {
       <article class="pr-row ${state.selected === pr.number ? "selected" : ""}" data-number="${pr.number}" data-repo="${esc(pr.repository?.nameWithOwner || state.repo)}">
         <img class="avatar" src="${esc(pr.author?.avatarUrl || "")}" alt="" />
         <div class="pr-title-line">
-          ${state.repo === ALL_REPOS ? `<span class="label-pill repo-pill">${esc(pr.repository?.nameWithOwner || "")}</span>` : ""}
+          ${state.repo === ALL_REPOS ? repoPill(pr) : ""}
           <span class="pr-title">${esc(pr.title)} <span class="pr-number">#${pr.number}</span></span>
           ${labelPills(pr)}
+          ${sessionBadge(pr)}
         </div>
         <div class="pr-right">
           ${approvalFaces(pr)} ${checksIcon(pr)} ${reviewChip(pr)} ${mergeStateChip(pr)} ${stateChip(pr)}
@@ -127,16 +166,27 @@ function renderList() {
         <div class="pr-sub">
           <span class="branches">
             <span class="branch" title="${esc(pr.headRefName)}">${esc(pr.headRefName)}</span>
-            <span class="arrow">→</span>
+            <span class="arrow">${icon("arrow-right")}</span>
             <span class="branch" title="${esc(pr.baseRefName)}">${esc(pr.baseRefName)}</span>
           </span>
-          <span class="meta-mini">${esc(pr.author?.login || "?")} · ${timeAgo(pr.updatedAt)} · <span class="checks-success">+${pr.additions ?? 0}</span>/<span class="checks-failure">−${pr.deletions ?? 0}</span> · 💬 ${pr.comments?.totalCount ?? 0}${state.draftKeys.has(`${pr.repository?.nameWithOwner || state.repo}#${pr.number}`) ? ` · 📝 ${t("borradores")}` : ""}</span>
+          <span class="meta-mini">${esc(pr.author?.login || "?")} · ${timeAgo(pr.updatedAt)} · <span class="checks-success">+${pr.additions ?? 0}</span>/<span class="checks-failure">−${pr.deletions ?? 0}</span> · ${icon("message-square")} ${pr.comments?.totalCount ?? 0}${hasDrafts(pr) ? ` · ${icon("file-pen-line")} ${t("borradores")}` : ""}</span>
+          ${conflictButton(pr)}
         </div>
       </article>`,
     )
     .join("");
   list.querySelectorAll(".pr-row").forEach((row) =>
-    row.addEventListener("click", () => openDetail(Number(row.dataset.number), "conv", row.dataset.repo)),
+    row.addEventListener("click", (ev) => {
+      const agent = ev.target.closest("[data-session]");
+      if (agent) {
+        if (!sessionsOpen()) toggleSessionsPane(true);
+        if (viewingId() !== agent.dataset.session) openSessionView(agent.dataset.session);
+        return;
+      }
+      const fix = ev.target.closest("[data-fix]");
+      if (fix) return launchConflictFix(fix.dataset.fix, fix);
+      openDetail(Number(row.dataset.number), "conv", row.dataset.repo);
+    }),
   );
 
   if (IS_SELFTEST && !state.selftestOpenedDetail && prs.length && (["list", "changes"].includes(SELFTEST_ROUTE) || SELFTEST_ROUTE.startsWith("review"))) {

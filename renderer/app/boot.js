@@ -3,6 +3,7 @@
 function renderRepoSelect() {
   const select = $("#repo-select");
   const repos = state.config?.repos || [];
+  select.hidden = repos.length < 2; // con un solo repo no hay nada que elegir
   const allOption = repos.length > 1
     ? `<option value="${ALL_REPOS}" ${state.repo === ALL_REPOS ? "selected" : ""}>${t("Todos los repos")}</option>`
     : "";
@@ -31,7 +32,7 @@ let updating = false;
 async function startUpdate(info) {
   if (updating) return; // el toast vive 9s: clicks de más no lanzan otra descarga
   updating = true;
-  const label = (extra = "") => t("⬇️ Descargando v{v}…{extra}", { v: info.latest, extra });
+  const label = (extra = "") => t("Descargando v{v}…{extra}", { v: info.latest, extra });
   const el = toast(label(), "", null, true);
   const off = window.monstro.onUpdateProgress((p) => {
     el.textContent = label(` ${p}%`);
@@ -40,8 +41,8 @@ async function startUpdate(info) {
     const r = await window.monstro.installUpdate();
     if (!r?.ok) throw new Error(r.error || t("error desconocido"));
     el.remove();
-    if (r.mode === "restart") toast(t("✅ Actualizada — reiniciando…"), "ok");
-    else if (r.mode === "dmg") toast(t("✅ v{v} descargada — cerrando Monstro, arrástrala a Aplicaciones", { v: info.latest }), "ok");
+    if (r.mode === "restart") toast(t("Actualizada — reiniciando…"), "ok");
+    else if (r.mode === "dmg") toast(t("v{v} descargada — cerrando Monstro, arrástrala a Aplicaciones", { v: info.latest }), "ok");
   } catch (err) {
     el.remove();
     // Con enlace a la release: si la descarga falla, al menos que pueda bajarla a mano.
@@ -106,7 +107,9 @@ async function boot() {
     (state.config.repos.includes(remembered) && remembered) ||
     (state.config.repos.length > 1 ? ALL_REPOS : state.config.repos[0]) ||
     null;
-  if (state.config.lastBucket && !IS_SELFTEST) state.bucket = state.config.lastBucket;
+  // Instalaciones antiguas pueden recordar un bucket ya eliminado (mine/review/draft): esos caen en "open".
+  const lastBucket = state.config.lastBucket;
+  if (lastBucket && !IS_SELFTEST) state.bucket = ["merged", "closed"].includes(lastBucket) ? lastBucket : "open";
   document.querySelectorAll(".bucket").forEach((b) => b.classList.remove("active"));
   document.querySelector(`[data-bucket="${state.bucket}"]`)?.classList.add("active");
   state.draftKeys = new Set(await window.monstro.draftsKeys().catch(() => []));
@@ -152,10 +155,11 @@ async function boot() {
   await refresh();
   hideSplash();
   schedulePoll();
+  initSessions();
   // Aviso de versión nueva al arrancar. Click en el toast → actualiza (ver startUpdate).
   if (!IS_SELFTEST && state.config.checkUpdates) {
     window.monstro.checkUpdates().then((r) => {
-      if (r?.newer) toast(t("✨ Versión nueva disponible: v{v} — pulsa para actualizar", { v: r.latest }), "ok", () => startUpdate(r));
+      if (r?.newer) toast(t("Versión nueva disponible: v{v} — pulsa para actualizar", { v: r.latest }), "ok", () => startUpdate(r));
     }).catch(() => {});
   }
   if (IS_SELFTEST && SELFTEST_ROUTE === "history") enterHistory();
@@ -168,6 +172,17 @@ async function boot() {
   if (IS_SELFTEST && SELFTEST_ROUTE === "releases-publish") enterReleases("publish");
   if (IS_SELFTEST && SELFTEST_ROUTE === "releases-pipelines") enterReleases("pipelines");
   if (IS_SELFTEST && SELFTEST_ROUTE === "entornos") enterEnvironments();
+  if (IS_SELFTEST && SELFTEST_ROUTE === "pruebas") enterPruebas();
+  if (IS_SELFTEST && SELFTEST_ROUTE.startsWith("validacion")) {
+    // `validacion-detail` abre la ficha (popover) de una tarjeta; `validacion-dock`, el panel de abajo.
+    state.validation.selftestDetail = { "validacion-detail": "popover", "validacion-dock": "dock" }[SELFTEST_ROUTE] || null;
+    enterValidation();
+  }
+  if (IS_SELFTEST && SELFTEST_ROUTE.startsWith("usuarios")) {
+    // `usuarios-q:<texto>` entra ya buscando ese texto.
+    state.cognito.q = SELFTEST_ROUTE.startsWith("usuarios-q:") ? SELFTEST_ROUTE.slice("usuarios-q:".length) : "";
+    enterCognito();
+  }
   if (IS_SELFTEST && SELFTEST_ROUTE === "propuestas") enterProposals();
   if (IS_SELFTEST && SELFTEST_ROUTE.startsWith("palette")) {
     openPalette();
@@ -194,6 +209,13 @@ async function boot() {
   if (IS_SELFTEST && SELFTEST_ROUTE === "local-vincular") runLocalLinkSelftest();
   if (IS_SELFTEST && (SELFTEST_ROUTE === "local-historico" || SELFTEST_ROUTE === "local-historico-detail")) runLocalHistorySelftest();
   if (IS_SELFTEST && SELFTEST_ROUTE === "local-list") runLocalListSelftest();
+  if (IS_SELFTEST && SELFTEST_ROUTE === "sessions") runSessionsSelftest();
+  if (IS_SELFTEST && SELFTEST_ROUTE.startsWith("sessions-q:")) runSessionsSelftest(SELFTEST_ROUTE.slice("sessions-q:".length));
+  if (IS_SELFTEST && SELFTEST_ROUTE === "sessions-mr") runSessionsMrSelftest();
+  // `sessions-view[:<texto>][#summary|plan|changes]`
+  if (IS_SELFTEST && /^sessions-view([:#]|$)/.test(SELFTEST_ROUTE)) runSessionsViewSelftest(SELFTEST_ROUTE.slice("sessions-view".length));
+  if (IS_SELFTEST && SELFTEST_ROUTE === "sessions-launch") runSessionsLaunchSelftest();
+  if (IS_SELFTEST && SELFTEST_ROUTE === "sessions-implement") runSessionsImplementSelftest();
   if (IS_SELFTEST && (SELFTEST_ROUTE === "local-empezar" || SELFTEST_ROUTE === "local-plan")) runLocalStartSelftest();
   if (IS_SELFTEST && SELFTEST_ROUTE === "local-agents") runLocalAgentsSelftest();
 }
@@ -422,18 +444,19 @@ $("#repo-select").addEventListener("change", (event) => {
 $("#search").addEventListener("input", (event) => {
   state.search = event.target.value;
   if (state.view === "milestones") renderMilestones();
-  else if (["releases", "local", "support", "environments"].includes(state.view)) {/* estas vistas no usan el buscador global */}
+  else if (["releases", "local", "support", "environments", "cognito", "validation", "pruebas"].includes(state.view)) {/* estas vistas no usan el buscador global */}
   else renderList();
 });
 document.querySelectorAll(".bucket[data-bucket]").forEach((btn) =>
   btn.addEventListener("click", () => switchBucket(btn.dataset.bucket)),
 );
-wireSidebarCollapse();
-applySidebarCollapse();
 $("#bucket-history").addEventListener("click", enterHistory);
 $("#bucket-milestones").addEventListener("click", () => enterMilestones("tasks"));
 $("#bucket-milestones-summary").addEventListener("click", () => enterMilestones("summary"));
 $("#bucket-entornos").addEventListener("click", () => enterEnvironments());
+$("#bucket-validacion").addEventListener("click", () => enterValidation());
+$("#bucket-pruebas").addEventListener("click", () => enterPruebas());
+$("#bucket-usuarios").addEventListener("click", () => enterCognito());
 $("#bucket-propuestas").addEventListener("click", () => enterProposals());
 $("#bucket-support").addEventListener("click", () => enterSupport("incidencias"));
 $("#bucket-ops").addEventListener("click", () => enterSupport("operaciones"));
@@ -457,8 +480,11 @@ function firstAvailableLanding() {
     ["soporte", () => enterSupport("incidencias")],
     ["releases", () => enterReleases("branches")],
     ["entornos", () => enterEnvironments()],
+    ["validacion", () => enterValidation()],
+    ["pruebas", () => enterPruebas()],
     ["local", () => enterLocal("empezar")],
     ["propuestas", () => enterProposals()],
+    ["usuarios", () => enterCognito()],
   ];
   const found = order.find(([key]) => sectionEnabled(key));
   return found ? found[1] : null;
@@ -484,7 +510,7 @@ function switchRepo(repo) {
   closeDetail();
   if (state.view === "history") loadHistory();
   // Milestones, Releases, Soporte y Trabajo local son de grupo/proyecto fijo, no por repo: el cambio no las afecta.
-  else if (!["milestones", "releases", "local", "support", "environments"].includes(state.view)) refresh();
+  else if (!["milestones", "releases", "local", "support", "environments", "validation", "pruebas"].includes(state.view)) refresh();
 }
 
 /* ============ atajos de teclado ============ */
@@ -506,7 +532,7 @@ function openCheatsheet() {
     ["⌘P", t("Paleta de comandos: todas las acciones de la app")],
     ["j / k", t("Moverse por la lista")],
     ["Enter", t("Abrir la PR seleccionada")],
-    ["1 – 6", t("Abiertas · Mías · Para revisar · Borradores · Fusionadas · Cerradas")],
+    ["1 – 3", t("Merge requests · Fusionadas · Cerradas")],
     ["h", t("Histórico (grafo de ramas)")],
     ["m", t("Milestones (tareas por persona · GitLab)")],
     ["r", t("Refrescar")],
@@ -516,7 +542,7 @@ function openCheatsheet() {
   root.innerHTML = `
     <div class="modal-backdrop" id="modal-backdrop">
       <div class="modal">
-        <h3>⌨️ ${esc(t("Atajos de teclado"))}</h3>
+        <h3>${icon("keyboard")} ${esc(t("Atajos de teclado"))}</h3>
         <table class="cheatsheet">${rows.map(([key, what]) => `<tr><td><kbd>${key}</kbd></td><td>${esc(what)}</td></tr>`).join("")}</table>
         <div class="modal-actions"><button class="btn" id="modal-cancel">${esc(t("Cerrar"))}</button></div>
       </div>
@@ -538,7 +564,7 @@ document.addEventListener("keydown", (event) => {
   const typing = ["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement?.tagName);
   if (typing) return;
   if (event.key === "?") return openCheatsheet();
-  if (event.key === "Escape") return closeDetail();
+  if (event.key === "Escape") return viewingId() ? hideDetail() : closeDetail(); // de la ficha, al tablero
   if (event.key === "r") return refresh();
   if (event.key === "j") return moveCursor(1);
   if (event.key === "k") return moveCursor(-1);
@@ -549,7 +575,7 @@ document.addEventListener("keydown", (event) => {
   }
   if (event.key === "h" && sectionEnabled("historico")) return enterHistory();
   if (event.key === "m" && sectionEnabled("milestones")) return enterMilestones();
-  const bucketByDigit = { 1: "open", 2: "mine", 3: "review", 4: "draft", 5: "merged", 6: "closed" };
+  const bucketByDigit = { 1: "open", 2: "merged", 3: "closed" };
   const digitBucket = bucketByDigit[event.key];
   if (digitBucket && sectionEnabled(["merged", "closed"].includes(digitBucket) ? "historial" : "prs")) switchBucket(digitBucket);
 });

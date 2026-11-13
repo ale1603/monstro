@@ -192,19 +192,6 @@ async function mergePR(repoFullName, number, { deleteBranch, headRefName, isCros
   return { merged: result.merged === true, sha: result.sha, branchDeleted };
 }
 
-/** Update branch SIEMPRE con rebase (así se hacen los pull aquí). */
-async function updateBranchRebase(prNodeId) {
-  const data = await gql(
-    `mutation ($id: ID!) {
-       updatePullRequestBranch(input: { pullRequestId: $id, updateMethod: REBASE }) {
-         pullRequest { number mergeStateStatus }
-       }
-     }`,
-    { id: prNodeId },
-  );
-  return data.updatePullRequestBranch.pullRequest;
-}
-
 /* ---------- histórico (grafo de commits) ---------- */
 
 const HISTORY_COMMIT_FIELDS = `
@@ -305,6 +292,9 @@ async function addIssueComment(repoFullName, number, body) {
   return rest("POST", `/repos/${repoFullName}/issues/${number}/comments`, { body });
 }
 
+// En GitHub los comentarios de issues y de PRs son el mismo endpoint (en GitLab no: ver addIssueNote).
+const addIssueNote = addIssueComment;
+
 async function addInlineComment(repoFullName, number, { body, commitId, path, side, line }) {
   return rest("POST", `/repos/${repoFullName}/pulls/${number}/comments`, {
     body,
@@ -349,9 +339,17 @@ async function submitReview(repoFullName, number, { commitId, event, body, comme
   return rest("POST", `/repos/${repoFullName}/pulls/${number}/reviews`, payload);
 }
 
-/** Descarta una review publicada (quitar tu aprobación). GitHub exige un mensaje. */
-async function dismissReview(repoFullName, number, reviewId, message) {
-  return rest("PUT", `/repos/${repoFullName}/pulls/${number}/reviews/${reviewId}/dismissals`, { message });
+// Los borradores de review en el servidor (draft notes) solo existen en GitLab.
+async function updateDraftNote() {
+  throw new Error("Editar borradores de review solo está disponible en GitLab.");
+}
+
+async function deleteDraftNote() {
+  throw new Error("Borrar borradores de review solo está disponible en GitLab.");
+}
+
+async function publishDraftNotes() {
+  throw new Error("Publicar borradores de review del servidor solo está disponible en GitLab.");
 }
 
 /* ---------- acciones sobre el grafo ---------- */
@@ -401,6 +399,10 @@ async function milestoneEpicChildren() {
 
 async function issueMRs() {
   throw new Error("La vista de Milestones solo está disponible en GitLab.");
+}
+
+async function taskMergeRequests() {
+  throw new Error("El lanzador de agentes solo está disponible en GitLab.");
 }
 
 async function projectIssues() {
@@ -459,6 +461,34 @@ async function playJob() {
   throw new Error("Lanzar jobs de CI solo está disponible en GitLab.");
 }
 
+async function validationBoard() {
+  throw new Error("El tablero de Validación solo está disponible en GitLab.");
+}
+
+async function validationAct() {
+  throw new Error("El tablero de Validación solo está disponible en GitLab.");
+}
+
+async function pruebasBoard() {
+  throw new Error("La sección Pruebas solo está disponible en GitLab.");
+}
+
+async function pruebasTask() {
+  throw new Error("La sección Pruebas solo está disponible en GitLab.");
+}
+
+async function pruebasAct() {
+  throw new Error("La sección Pruebas solo está disponible en GitLab.");
+}
+
+async function pruebasNewPipeline() {
+  throw new Error("La sección Pruebas solo está disponible en GitLab.");
+}
+
+async function pruebasRunMrPipeline() {
+  throw new Error("La sección Pruebas solo está disponible en GitLab.");
+}
+
 async function createSnippet() {
   throw new Error("Publicar el resumen como snippet solo está disponible en GitLab.");
 }
@@ -500,6 +530,10 @@ async function mrStatus() {
 async function issueStatus() {
   throw new Error("El estado del histórico solo está disponible en GitLab.");
 }
+// Ficha del panel Agents: las PRs van por prDetail; una issue de GitHub sale sin título (el link no rompe).
+async function issueDetail() {
+  throw new Error("El detalle de issues solo está disponible en GitLab.");
+}
 
 async function revertPullRequest(prNodeId) {
   const data = await gql(
@@ -540,6 +574,11 @@ async function prNodeId(repoFullName, number) {
   return data.repository.pullRequest.id;
 }
 
+// En GitHub la PR de una sesión ya llega por el `pr-link` del transcript (ver src/sessions.js).
+async function mrForBranch() {
+  return null;
+}
+
 module.exports = {
   resolveToken,
   invalidateTokenCache,
@@ -547,19 +586,22 @@ module.exports = {
   viewerRepos,
   listPRs,
   searchPRs,
+  mrForBranch,
   prDetail,
   mergePR,
-  updateBranchRebase,
   defaultBranch,
   branchHistories,
   prFiles,
   prConversation,
   addIssueComment,
+  addIssueNote,
   addInlineComment,
   replyToThread,
   setThreadResolved,
   submitReview,
-  dismissReview,
+  updateDraftNote,
+  deleteDraftNote,
+  publishDraftNotes,
   createBranch,
   forceUpdateBranch,
   cherryPick,
@@ -571,6 +613,7 @@ module.exports = {
   milestoneIssues,
   milestoneEpicChildren,
   issueMRs,
+  taskMergeRequests,
   projectIssues,
   groupLabels,
   groupProjects,
@@ -584,6 +627,13 @@ module.exports = {
   projectEnvironments,
   releasePipeline,
   playJob,
+  validationBoard,
+  validationAct,
+  pruebasBoard,
+  pruebasTask,
+  pruebasAct,
+  pruebasNewPipeline,
+  pruebasRunMrPipeline,
   createSnippet,
   saveMilestoneSummary,
   createIssue,
@@ -594,4 +644,5 @@ module.exports = {
   createIssueLink,
   mrStatus,
   issueStatus,
+  issueDetail,
 };

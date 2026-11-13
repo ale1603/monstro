@@ -55,6 +55,7 @@ const STUBBED = new Set([
   "electron",
   "../agents",
   "../ai",
+  "../cognito",
   "../config",
   "../drafts",
   "../health",
@@ -99,6 +100,9 @@ const PROJECT = {
 
 const PAYLOAD = {
   version: "072026",
+  poolId: "eu-central-1_Abc123",
+  q: "alguien@ejemplo.es",
+  username: "alguien",
   sourceBranch: "development",
   targetBranch: "development",
   newBranch: "feat/x",
@@ -115,6 +119,12 @@ const PAYLOAD = {
   tag: "2026.07.0",
   branch: "development",
   jobId: "1",
+  // Sección Pruebas: proyecto del flujo, acción, motivo, epic y MRs que pasan sus validaciones.
+  project: 12,
+  kind: "play",
+  motivo: "m",
+  epicIid: 1,
+  mrs: [{ projectId: 12, iid: 1 }],
   milestones: ["2026.07"],
   milestoneId: 1,
   labels: ["l"],
@@ -130,6 +140,7 @@ const PAYLOAD = {
   name: "n",
   repo: "grupo/proyecto",
   number: 1,
+  draftNoteId: 1,
   url: "https://example.invalid/x",
   path: "grupo/proyecto",
   body: "b",

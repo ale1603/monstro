@@ -6,6 +6,8 @@ async function openDetail(number, tab = "conv", repoOverride = null) {
   state.detailTab = tab;
   state.files = null;
   state.conversation = null;
+  state.openFiles = null;
+  state.commentNav = null;
   renderList();
   detailPane.classList.remove("hidden");
   detailPane.classList.toggle("wide", tab === "changes");
@@ -23,10 +25,10 @@ async function openDetail(number, tab = "conv", repoOverride = null) {
     if (IS_SELFTEST && (new URLSearchParams(location.search).get("seed_draft") === "1" || SELFTEST_ROUTE.startsWith("review")) && !state.drafts.length) {
       const seed = (over) => ({ createdAt: new Date().toISOString(), kind: "general", ...over });
       state.drafts.push(seed({ id: "seed", body: "Esto es un borrador local: no está en GitHub." }));
-      state.drafts.push(seed({ id: "seed-ai-1", ai: true, aiModel: "claude-opus-4-8", aiEffort: "high", severity: "blocker", kind: "inline", path: "src/pedidos.js", side: "RIGHT", line: 42, body: "Si el pedido no tiene cliente, esto revienta.\n\n1. El cliente se da de baja → 2. su pedido se queda sin dueño → 3. alguien abre la lista de pedidos → 4. pantalla en blanco.\n\nComprueba el cliente antes de leer su nombre." }));
-      state.drafts.push(seed({ id: "seed-ai-2", ai: true, aiModel: "claude-opus-4-8", aiEffort: "high", severity: "important", kind: "inline", path: "src/pedidos.js", side: "RIGHT", line: 88, body: "Guardas dentro del bucle: si falla el tercer pedido, los dos primeros ya se han guardado y no hay vuelta atrás. Guarda una sola vez al final." }));
-      state.drafts.push(seed({ id: "seed-ai-3", ai: true, aiModel: "claude-opus-4-8", aiEffort: "high", severity: "minor", kind: "inline", path: "src/util.js", side: "RIGHT", line: 12, body: "El nombre dice que solo trae los activos, pero también devuelve los borrados. Renómbralo o filtra." }));
-      state.drafts.push(seed({ id: "seed-ai-4", ai: true, aiModel: "claude-opus-4-8", aiEffort: "high", severity: "nit", body: "Bien resuelto el cálculo del total: el redondeo ya no se pierde.\n\nBloqueante: el pedido sin cliente (línea 42).\n\nPruebas: la lógica nueva no tiene ninguna que corra sola en CI." }));
+      state.drafts.push(seed({ id: "seed-2", severity: "blocker", kind: "inline", path: "src/pedidos.js", side: "RIGHT", line: 42, body: "Si el pedido no tiene cliente, esto revienta.\n\n1. El cliente se da de baja → 2. su pedido se queda sin dueño → 3. alguien abre la lista de pedidos → 4. pantalla en blanco.\n\nComprueba el cliente antes de leer su nombre." }));
+      state.drafts.push(seed({ id: "seed-3", severity: "important", kind: "inline", path: "src/pedidos.js", side: "RIGHT", line: 88, body: "Guardas dentro del bucle: si falla el tercer pedido, los dos primeros ya se han guardado y no hay vuelta atrás. Guarda una sola vez al final." }));
+      state.drafts.push(seed({ id: "seed-4", severity: "minor", kind: "inline", path: "src/util.js", side: "RIGHT", line: 12, body: "El nombre dice que solo trae los activos, pero también devuelve los borrados. Renómbralo o filtra." }));
+      state.drafts.push(seed({ id: "seed-5", severity: "nit", body: "Bien resuelto el cálculo del total: el redondeo ya no se pierde.\n\nBloqueante: el pedido sin cliente (línea 42).\n\nPruebas: la lógica nueva no tiene ninguna que corra sola en CI." }));
     }
   } catch (err) {
     detailContent.innerHTML = `<div class="detail-inner"><div class="error-box">${esc(String(err.message || err))}</div></div>`;
@@ -35,18 +37,7 @@ async function openDetail(number, tab = "conv", repoOverride = null) {
   }
   renderDetail();
   if (IS_SELFTEST && SELFTEST_ROUTE.startsWith("review")) {
-    if (SELFTEST_ROUTE === "review-model") return void openAiReviewModal(state.detailPR);
-    if (SELFTEST_ROUTE === "review-progress") {
-      state.aiGenerating = state.detailPR.number;
-      state.aiRunLabel = `claude-opus-4-8 · ${t("esfuerzo {level}", { level: "high" })}`;
-      state.aiSteps = [
-        "Leyendo src/pedidos.js", 'Buscando "GuardarPedido"', "Leyendo src/pedidos/repo.js",
-        "Leyendo src/clientes/servicio.js", 'Buscando "ClienteId"', "Listando tests/pedidos/*",
-        "Leyendo tests/pedidos/guardar.test.js", "Leyendo src/util.js",
-      ];
-      return void renderAiProgressModal(state.detailPR);
-    }
-    if (SELFTEST_ROUTE === "review-edit") state.editingDraftId = "seed-ai-1";
+    if (SELFTEST_ROUTE === "review-edit") state.editingDraftId = "seed-2";
     openDraftsViewer();
   }
 }
@@ -54,52 +45,49 @@ async function openDetail(number, tab = "conv", repoOverride = null) {
 function renderDetail() {
   const pr = state.detailPR;
   if (!pr) return;
+  // Los ficheros que tenías desplegados (a mano o por un salto) se leen del DOM antes de repintarlo:
+  // el evento `toggle` es asíncrono y llegaría tarde si se repinta justo después de abrir uno.
+  const shownFiles = detailContent.querySelectorAll("details.diff-file");
+  if (shownFiles.length) state.openFiles = new Set([...shownFiles].filter((d) => d.open).map((d) => d.dataset.file));
   const blockReason = mergeBlockReason(pr);
   const threadCount = state.conversation?.reviewThreads?.nodes?.length ?? 0;
   detailPane.classList.toggle("wide", state.detailTab === "changes");
 
   detailContent.innerHTML = `
     <div class="detail-inner ${state.detailTab === "changes" ? "detail-full" : ""}">
-      <button class="detail-close" id="detail-close" title="${t("Cerrar (Esc)")}">✕</button>
+      <button class="detail-close" id="detail-close" title="${t("Cerrar (Esc)")}">${icon("x")}</button>
       <div class="detail-title">${esc(pr.title)} <span class="pr-number">#${pr.number}</span></div>
       <div class="detail-sub">
         ${stateChip(pr)} ${reviewChip(pr)} ${mergeStateChip(pr)}
         <span class="branches">
-          <span class="branch">${esc(pr.headRefName)}</span><span class="arrow">→</span><span class="branch">${esc(pr.baseRefName)}</span>
+          <span class="branch">${esc(pr.headRefName)}</span><span class="arrow">${icon("arrow-right")}</span><span class="branch">${esc(pr.baseRefName)}</span>
         </span>
       </div>
 
       <div class="actions">
-        <button class="btn btn-accent" id="act-update" ${pr.state !== "OPEN" ? "disabled" : ""}
-                title="${t("Actualiza la rama con la base usando rebase")}">⤴ ${t("Update branch (rebase)")}</button>
+        <button class="btn btn-accent" id="act-editor" ${pr.state === "OPEN" ? "" : "disabled"}
+                title="${t("Crea un worktree en la rama de la PR y lo abre en su editor: Rider si es .NET, VS Code si no")}">${icon("code")} ${t("Abrir en Rider / VS Code")}</button>
         <button class="btn btn-primary" id="act-merge" ${canMerge(pr) ? "" : "disabled"}
-                title="${esc(blockReason || t("Merge con merge commit"))}">⇅ ${t("Merge (merge commit)")}</button>
-        ${state.aiGenerating === pr.number
-          ? `<button class="btn btn-ai" id="act-ai" title="${t("Ver por dónde va la review")}"><span class="spinner"></span> <span id="act-ai-step">${esc(state.aiStep || t("Generando review…"))}</span></button>`
-          : `<button class="btn btn-ai" id="act-ai" ${pr.state === "OPEN" ? "" : "disabled"}
-                title="${t("Revisa la MR y deja los comentarios como borradores para que los repases: nada se publica hasta que tú lo digas")}">🤖 ${t("Review con IA")}</button>`}
-        ${myApprovedReview(pr) && pr.state === "OPEN"
-          ? `<button class="btn" id="act-unapprove"
-                title="${t("Descarta tu review aprobada (GitHub lo registra en la PR con el motivo)")}">↩︎ ${t("Quitar aprobación")}</button>`
-          : `<button class="btn" id="act-approve" ${pr.state === "OPEN" && pr.author?.login !== state.me?.login ? "" : "disabled"}
-                title="${pr.author?.login === state.me?.login ? t("No puedes aprobar tu propia PR") : t("Aprobar sin comentarios (pide confirmación)")}">✅ ${t("Aprobar")}</button>`}
+                title="${esc(blockReason || t("Merge con merge commit"))}">${icon("git-merge")} ${t("Merge (merge commit)")}</button>
+        <button class="btn btn-ai" id="act-ai" ${pr.state === "OPEN" ? "" : "disabled"}
+                title="${t("Lanza /mr-review-gitlab sobre esta MR en Ghostty")}">${icon("bot")} ${t("Review con IA")}</button>
         ${pr.state === "OPEN" && pr.author?.login === state.me?.login
-          ? `<button class="btn" id="act-draft-toggle" title="${pr.isDraft ? t("Marca la PR como lista: notifica a los reviewers") : t("Convierte la PR en borrador: deja de pedir reviews")}">${pr.isDraft ? `🚀 ${t("Marcar lista para review")}` : `↩︎ ${t("Convertir a borrador")}`}</button>`
+          ? `<button class="btn" id="act-draft-toggle" title="${pr.isDraft ? t("Marca la PR como lista: notifica a los reviewers") : t("Convierte la PR en borrador: deja de pedir reviews")}">${pr.isDraft ? `${icon("rocket")} ${t("Marcar lista para review")}` : `${icon("undo-2")} ${t("Convertir a borrador")}`}</button>`
           : ""}
       </div>
       <div class="copy-row">
-        <button class="mini-btn" id="copy-branch" title="${t("Copiar nombre de la rama")}">📋 ${esc(pr.headRefName)}</button>
-        <button class="mini-btn" id="copy-checkout" title="${t("Copiar comando para traerte la PR en local")}">⬇ gh pr checkout ${pr.number}</button>
-        <button class="mini-btn" id="copy-url" title="${t("Copiar URL de la PR")}">🔗 URL</button>
+        <button class="mini-btn" id="copy-branch" title="${t("Copiar nombre de la rama")}">${icon("copy")} ${esc(pr.headRefName)}</button>
+        <button class="mini-btn" id="copy-url" title="${t("Copiar URL de la PR")}">${icon("link")} URL</button>
+        <button class="mini-btn" id="open-external" title="${t("Abrir en el navegador")}">${icon("external-link")} ${providerName()}</button>
       </div>
-      ${blockReason && pr.state === "OPEN" ? `<p class="muted">⚠️ ${esc(blockReason)}</p>` : ""}
+      ${blockReason && pr.state === "OPEN" ? `<p class="muted">${icon("triangle-alert")} ${esc(blockReason)}</p>` : ""}
 
       <div class="tabs">
         <button class="tab ${state.detailTab === "conv" ? "active" : ""}" data-tab="conv">
           ${t("Conversación")} <span class="count">${pr.comments?.totalCount ?? 0}</span>
         </button>
         <button class="tab ${state.detailTab === "changes" ? "active" : ""}" data-tab="changes">
-          ${t("Cambios")} <span class="count">${t("{n} ficheros", { n: pr.changedFiles })} · ${t("{n} hilos", { n: threadCount })}${state.drafts.filter((d) => d.kind === "inline").length ? ` · 📝 ${state.drafts.filter((d) => d.kind === "inline").length}` : ""}</span>
+          ${t("Cambios")} <span class="count">${t("{n} ficheros", { n: pr.changedFiles })} · ${t("{n} hilos", { n: threadCount })}${state.drafts.filter((d) => d.kind === "inline").length ? ` · ${icon("file-pen-line")} ${state.drafts.filter((d) => d.kind === "inline").length}` : ""}</span>
         </button>
       </div>
 
@@ -108,15 +96,13 @@ function renderDetail() {
     </div>`;
 
   $("#detail-close").addEventListener("click", closeDetail);
-  $("#act-update").addEventListener("click", () => updateBranch(pr));
+  $("#act-editor").addEventListener("click", () => openPrInEditor(pr));
   $("#act-merge").addEventListener("click", () => confirmMerge(pr));
-  $("#act-ai").addEventListener("click", () => openAiReviewModal(pr));
-  $("#act-approve")?.addEventListener("click", () => confirmApprove(pr));
-  $("#act-unapprove")?.addEventListener("click", () => confirmUnapprove(pr));
+  $("#act-ai").addEventListener("click", () => launchAiReview(pr));
   $("#act-draft-toggle")?.addEventListener("click", () => toggleDraftState(pr));
   $("#copy-branch").addEventListener("click", () => copyText(pr.headRefName));
-  $("#copy-checkout").addEventListener("click", () => copyText(`gh pr checkout ${pr.number}`));
   $("#copy-url").addEventListener("click", () => copyText(pr.url));
+  $("#open-external").addEventListener("click", () => window.monstro.openExternal(pr.url));
   wireDraftsBar();
   detailContent.querySelectorAll(".tab").forEach((tabBtn) =>
     tabBtn.addEventListener("click", () => {
@@ -129,25 +115,108 @@ function renderDetail() {
   else renderChangesTab();
 }
 
-function closeDetail() {
+// Oculta el detalle sin salir de Agents: así vuelve la ficha de una sesión al tablero.
+function hideDetail() {
   state.selected = null;
   state.detailPR = null;
   detailPane.classList.add("hidden");
   detailPane.classList.remove("wide");
   renderList();
+  renderSessions(); // si era la ficha de una sesión, su tarjeta deja de estar marcada
+}
+
+// Todas las vistas pasan por aquí al entrar, así que también saca del tablero de Agents: a pantalla
+// completa las taparía.
+function closeDetail() {
+  hideDetail();
+  if (sessionsOpen()) toggleSessionsPane(false);
 }
 
 /* ============ tab conversación ============ */
 function commentBlock(comment) {
-  return `
-    <div class="comment">
-      <div class="comment-head">
-        <img src="${esc(comment.author?.avatarUrl || "")}" alt="" />
+  if (comment.isPendingDraft && comment.draftNoteId === state.editingDraftNoteId) {
+    return `
+      <div class="comment pending-draft editing">
+        <div class="comment-head"><b>${icon("pencil")} ${t("Editando borrador en GitLab")}</b></div>
+        <div class="pending-editor">
+          <textarea class="draft-editor" rows="5">${esc(comment.body || "")}</textarea>
+          <div class="composer-actions">
+            <button class="btn pending-edit-cancel">${t("Cancelar")}</button>
+            <button class="btn btn-accent pending-edit-save">${t("Guardar")}</button>
+          </div>
+        </div>
+      </div>`;
+  }
+  // Borrador de review en GitLab (draft note): nadie más lo ve todavía y la API no trae autor ni fecha.
+  const head = comment.isPendingDraft
+    ? `<b>${icon("file-pen-line")} ${t("Borrador en GitLab")}</b>
+        <span class="muted">${t("sin publicar")}</span>
+        ${comment.draftNoteId ? `<button class="draft-edit pending-edit" data-draft-note="${comment.draftNoteId}" title="${t("Editar borrador")}">${icon("pencil")}</button>
+          <button class="draft-del pending-del" data-draft-note="${comment.draftNoteId}" title="${t("Borrar borrador de GitLab")}">${icon("trash-2")}</button>` : ""}`
+    : `<img src="${esc(comment.author?.avatarUrl || "")}" alt="" />
         <b>${esc(comment.author?.login || "?")}</b>
-        <span class="muted">${timeAgo(comment.createdAt)}</span>
+        <span class="muted">${timeAgo(comment.createdAt)}</span>`;
+  return `
+    <div class="comment ${comment.isPendingDraft ? "pending-draft" : ""}">
+      <div class="comment-head">
+        ${head}
       </div>
       <div class="comment-body pr-body">${comment.bodyHTML || ""}</div>
     </div>`;
+}
+
+// Repinta sin mover la pantalla: editar, guardar o responder un comentario te deja donde estabas.
+function renderDetailInPlace() {
+  const { scrollTop } = detailPane;
+  renderDetail();
+  detailPane.scrollTop = scrollTop;
+}
+
+// Borradores de GitLab (draft notes): se edita el texto en el servidor y siguen sin publicarse.
+function wirePendingDraftEdits(container) {
+  container.querySelectorAll(".pending-edit").forEach((btn) =>
+    btn.addEventListener("click", () => {
+      state.editingDraftNoteId = Number(btn.dataset.draftNote);
+      renderDetailInPlace();
+      detailContent.querySelector(".pending-draft.editing .draft-editor")?.focus({ preventScroll: true });
+    }),
+  );
+  container.querySelectorAll(".pending-del").forEach((btn) =>
+    btn.addEventListener("click", async () => {
+      if (!confirm(t("¿Borrar este borrador de GitLab? No se puede deshacer."))) return;
+      btn.disabled = true;
+      try {
+        await window.monstro.deleteDraftNote(detailRepo(), state.detailPR.number, Number(btn.dataset.draftNote));
+        state.conversation = await window.monstro.prConversation(detailRepo(), state.detailPR.number);
+        toast(t("Borrador borrado de GitLab"), "ok");
+        renderDetailInPlace();
+      } catch (err) {
+        toast(t("No se pudo borrar el borrador: {err}", { err: String(err.message || err) }), "err");
+        btn.disabled = false;
+      }
+    }),
+  );
+  const card = container.querySelector(".pending-draft.editing");
+  if (!card) return;
+  card.querySelector(".pending-edit-cancel").addEventListener("click", () => {
+    state.editingDraftNoteId = null;
+    renderDetailInPlace();
+  });
+  card.querySelector(".pending-edit-save").addEventListener("click", async (event) => {
+    const body = card.querySelector(".draft-editor").value.trim();
+    if (!body) return;
+    event.target.disabled = true;
+    try {
+      await window.monstro.updateDraftNote(detailRepo(), state.detailPR.number, state.editingDraftNoteId, body);
+      state.conversation = await window.monstro.prConversation(detailRepo(), state.detailPR.number);
+      state.editingDraftNoteId = null;
+      toast(t("Borrador actualizado en GitLab (sigue sin publicar)"), "ok");
+      renderDetailInPlace();
+    } catch (err) {
+      toast(t("No se pudo guardar el borrador: {err}", { err: String(err.message || err) }), "err");
+      event.target.disabled = false;
+    }
+  });
 }
 
 function renderConversationTab() {
@@ -168,7 +237,7 @@ function renderConversationTab() {
     <div class="composer">
       <textarea id="new-comment" rows="3" placeholder="${t("Escribe un comentario… se guarda como borrador hasta que publiques")}"></textarea>
       <div class="composer-actions">
-        <button class="btn btn-accent" id="send-comment">📝 ${t("Guardar borrador")}</button>
+        <button class="btn btn-accent" id="send-comment">${icon("file-pen-line")} ${t("Guardar borrador")}</button>
       </div>
     </div>
     <details class="desc-fold" ${longDescription ? "" : "open"}>
@@ -182,6 +251,7 @@ function renderConversationTab() {
   });
   wireExternalLinks();
   wireDraftCards($("#tab-body"));
+  wirePendingDraftEdits($("#tab-body"));
   $("#send-comment").addEventListener("click", async () => {
     const body = $("#new-comment").value.trim();
     if (!body) return;
@@ -230,15 +300,17 @@ function threadsByAnchor() {
 
 function threadBlock(thread) {
   const comments = thread.comments?.nodes || [];
+  // Un borrador de GitLab aún no es un hilo: ni se responde ni se resuelve hasta publicarlo.
+  if (thread.isPendingDraft) return `<div class="thread pending-draft">${comments.map(commentBlock).join("")}</div>`;
   const first = comments[0];
   const resolveBtn = !thread.id
     ? ""
     : thread.isResolved
-      ? (thread.viewerCanUnresolve ? `<button class="btn thread-resolve" data-resolve-id="${esc(thread.id)}" data-resolved="false" title="${t("Reabre la conversación en GitHub")}">↺ ${t("Reabrir")}</button>` : "")
-      : (thread.viewerCanResolve ? `<button class="btn thread-resolve resolve-ok" data-resolve-id="${esc(thread.id)}" data-resolved="true" title="${t("Marca la conversación como resuelta en GitHub")}">✓ ${t("Resolver")}</button>` : "");
+      ? (thread.viewerCanUnresolve ? `<button class="btn thread-resolve" data-resolve-id="${esc(thread.id)}" data-resolved="false" title="${t("Reabre la conversación en GitHub")}">${icon("rotate-ccw")} ${t("Reabrir")}</button>` : "")
+      : (thread.viewerCanResolve ? `<button class="btn thread-resolve resolve-ok" data-resolve-id="${esc(thread.id)}" data-resolved="true" title="${t("Marca la conversación como resuelta en GitHub")}">${icon("check")} ${t("Resolver")}</button>` : "");
   return `
     <div class="thread ${thread.isResolved ? "resolved" : ""}">
-      ${thread.isResolved ? `<div class="thread-tag">✓ ${t("Resuelto")}</div>` : ""}
+      ${thread.isResolved ? `<div class="thread-tag">${icon("check")} ${t("Resuelto")}</div>` : ""}
       ${comments.map(commentBlock).join("")}
       <div class="thread-reply">
         <textarea rows="2" placeholder="${t("Responder…")}"></textarea>

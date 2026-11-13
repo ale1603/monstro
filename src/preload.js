@@ -21,6 +21,7 @@ contextBridge.exposeInMainWorld("monstro", {
   mailPollLogin: (deviceCode) => ipcRenderer.invoke("mail:pollLogin", { deviceCode }),
   mailLogout: () => ipcRenderer.invoke("mail:logout"),
   mailList: () => ipcRenderer.invoke("mail:list"),
+  mailFolders: () => ipcRenderer.invoke("mail:folders"),
   mailPropose: (email) => ipcRenderer.invoke("mail:propose", { email }),
   mailCreate: (payload) => ipcRenderer.invoke("mail:create", payload),
   localSearchIssues: (query) => ipcRenderer.invoke("local:searchIssues", { query }),
@@ -42,6 +43,26 @@ contextBridge.exposeInMainWorld("monstro", {
   agentsDiff: (projectDir, worktree, base, branch) => ipcRenderer.invoke("agents:diff", { projectDir, worktree, base, branch }),
   agentsMrStatuses: (runId) => ipcRenderer.invoke("agents:mrStatuses", { runId }),
   agentsCleanupWorktree: (runId, projectDir) => ipcRenderer.invoke("agents:cleanupWorktree", { runId, projectDir }),
+  sessionsList: () => ipcRenderer.invoke("sessions:list"),
+  sessionsTag: (sessionId, url) => ipcRenderer.invoke("sessions:tag", { sessionId, url }),
+  sessionsUntag: (sessionId, key) => ipcRenderer.invoke("sessions:untag", { sessionId, key }),
+  sessionsOpenEditor: (sessionId, dir) => ipcRenderer.invoke("sessions:openEditor", { sessionId, dir }),
+  sessionsResume: (sessionId) => ipcRenderer.invoke("sessions:resume", { sessionId }),
+  sessionsFocus: (sessionId) => ipcRenderer.invoke("sessions:focus", { sessionId }),
+  sessionsAppIcons: () => ipcRenderer.invoke("sessions:appIcons"),
+  sessionsLaunchTargets: (url, action) => ipcRenderer.invoke("sessions:launchTargets", { url, action }),
+  sessionsLaunch: (url, action) => ipcRenderer.invoke("sessions:launch", { url, action }),
+  sessionsPickDir: () => ipcRenderer.invoke("sessions:pickDir"),
+  sessionsImplement: (prompt, dir) => ipcRenderer.invoke("sessions:implement", { prompt, dir }),
+  sessionsCleanWorktrees: (sessionId) => ipcRenderer.invoke("sessions:cleanWorktrees", { sessionId }),
+  sessionsClose: (sessionId) => ipcRenderer.invoke("sessions:close", { sessionId }),
+  sessionsDetail: (sessionId) => ipcRenderer.invoke("sessions:detail", { sessionId }),
+  sessionsLinkDetails: (sessionId) => ipcRenderer.invoke("sessions:linkDetails", { sessionId }),
+  sessionsLaunchOnLinks: (sessionId, action, keys) => ipcRenderer.invoke("sessions:launchOnLinks", { sessionId, action, keys: keys ?? null }),
+  // "Probar en local": plan de lo que se puede levantar de esa sesión, arranque y estado de lo arrancado.
+  localRunPlan: (sessionId) => ipcRenderer.invoke("localRun:plan", { sessionId }),
+  localRunStart: (sessionId, projects, targets) => ipcRenderer.invoke("localRun:start", { sessionId, projects, targets }),
+  localRunStatus: () => ipcRenderer.invoke("localRun:status"),
   // Eventos push de los agentes (timeline/estado/notificación). Devuelve un de-suscriptor.
   onAgentEvent: (channel, cb) => {
     const ok = ["agents:event", "agents:run", "agents:notify"];
@@ -54,7 +75,7 @@ contextBridge.exposeInMainWorld("monstro", {
   searchPRs: (repos, states) => ipcRenderer.invoke("prs:search", { repos, states }),
   prDetail: (repo, number) => ipcRenderer.invoke("pr:detail", { repo, number }),
   mergePR: (args) => ipcRenderer.invoke("pr:merge", args),
-  updateBranch: (nodeId) => ipcRenderer.invoke("pr:updateBranch", { nodeId }),
+  prOpenEditor: (repo, branch) => ipcRenderer.invoke("pr:openEditor", { repo, branch }),
   prFiles: (repo, number) => ipcRenderer.invoke("pr:files", { repo, number }),
   prConversation: (repo, number) => ipcRenderer.invoke("pr:conversation", { repo, number }),
   commentIssue: (repo, number, body) => ipcRenderer.invoke("pr:commentIssue", { repo, number, body }),
@@ -63,19 +84,10 @@ contextBridge.exposeInMainWorld("monstro", {
     ipcRenderer.invoke("pr:replyThread", { repo, number, commentDatabaseId, body }),
   resolveThread: (threadId, resolved) => ipcRenderer.invoke("pr:resolveThread", { threadId, resolved }),
   submitReview: (repo, number, review) => ipcRenderer.invoke("pr:submitReview", { repo, number, review }),
-  dismissReview: (repo, number, reviewId, message) =>
-    ipcRenderer.invoke("pr:dismissReview", { repo, number, reviewId, message }),
-  aiReview: (repo, pr, files, override) =>
-    ipcRenderer.invoke("ai:review", {
-      repo,
-      title: pr.title,
-      body: pr.body || "",
-      sourceBranch: pr.headRefName,
-      targetBranch: pr.baseRefName,
-      files,
-      model: override?.model || null,
-      effort: override?.effort || null,
-    }),
+  updateDraftNote: (repo, number, draftNoteId, body) =>
+    ipcRenderer.invoke("pr:updateDraftNote", { repo, number, draftNoteId, body }),
+  deleteDraftNote: (repo, number, draftNoteId) => ipcRenderer.invoke("pr:deleteDraftNote", { repo, number, draftNoteId }),
+  publishDraftNotes: (repo, number) => ipcRenderer.invoke("pr:publishDraftNotes", { repo, number }),
   aiStatus: () => ipcRenderer.invoke("ai:status"),
   aiPing: () => ipcRenderer.invoke("ai:ping"),
   draftsList: (key) => ipcRenderer.invoke("drafts:list", { key }),
@@ -108,6 +120,30 @@ contextBridge.exposeInMainWorld("monstro", {
   playReleaseJob: (projectId, jobId) => ipcRenderer.invoke("releases:playJob", { projectId, jobId }),
   projectEnvironments: (projectId) => ipcRenderer.invoke("env:list", { projectId }),
   envHealth: (url, project) => ipcRenderer.invoke("env:health", { url, project }),
+  validationBoard: (runId) => ipcRenderer.invoke("validation:board", { runId }),
+  // Tableros parciales mientras se enlazan las tareas. Devuelve un de-suscriptor.
+  onValidationProgress: (cb) => {
+    const listener = (_e, board) => cb(board);
+    ipcRenderer.on("validation:progress", listener);
+    return () => ipcRenderer.removeListener("validation:progress", listener);
+  },
+  validationAct: (repo, iid, kind, jobId) => ipcRenderer.invoke("validation:act", { repo, iid, kind, jobId }),
+  pruebasBoard: (runId) => ipcRenderer.invoke("pruebas:board", { runId }),
+  // Tableros parciales mientras cargan los pipelines. Devuelve un de-suscriptor.
+  onPruebasProgress: (cb) => {
+    const listener = (_e, board) => cb(board);
+    ipcRenderer.on("pruebas:progress", listener);
+    return () => ipcRenderer.removeListener("pruebas:progress", listener);
+  },
+  pruebasTask: (epicIid, mrs) => ipcRenderer.invoke("pruebas:task", { epicIid, mrs }),
+  pruebasAct: (project, jobId, kind, motivo) => ipcRenderer.invoke("pruebas:act", { project, jobId, kind, motivo }),
+  pruebasNewPipeline: (epicIid) => ipcRenderer.invoke("pruebas:newPipeline", { epicIid }),
+  pruebasRunMrPipeline: (projectId, iid) => ipcRenderer.invoke("pruebas:runMrPipeline", { projectId, iid }),
+  cognitoProfiles: () => ipcRenderer.invoke("cognito:profiles"),
+  cognitoPools: () => ipcRenderer.invoke("cognito:pools"),
+  cognitoUsers: (poolId, q) => ipcRenderer.invoke("cognito:users", { poolId, q }),
+  cognitoUser: (poolId, username) => ipcRenderer.invoke("cognito:user", { poolId, username }),
+  cognitoConsole: (poolId, username) => ipcRenderer.invoke("cognito:console", { poolId, username }),
   openExternal: (url) => ipcRenderer.invoke("shell:open", url),
   checkUpdates: () => ipcRenderer.invoke("update:check"),
   installUpdate: () => ipcRenderer.invoke("update:install"),
@@ -117,13 +153,13 @@ contextBridge.exposeInMainWorld("monstro", {
     ipcRenderer.on("update:progress", listener);
     return () => ipcRenderer.removeListener("update:progress", listener);
   },
-  // Paso actual de la review con IA ({tool, target}) mientras el agente lee el repo. De-suscriptor.
-  onReviewProgress: (cb) => {
-    const listener = (_e, step) => cb(step);
-    ipcRenderer.on("ai:review-progress", listener);
-    return () => ipcRenderer.removeListener("ai:review-progress", listener);
+  notify: (title, body, sessionId = null) => ipcRenderer.invoke("notify", { title, body, sessionId }),
+  // Click en el aviso de una sesión de Agents (src/ipc/system.js). Devuelve un de-suscriptor.
+  onNotifySession: (cb) => {
+    const listener = (_e, sessionId) => cb(sessionId);
+    ipcRenderer.on("notify:session", listener);
+    return () => ipcRenderer.removeListener("notify:session", listener);
   },
-  notify: (title, body) => ipcRenderer.invoke("notify", { title, body }),
   dockBadge: (text) => ipcRenderer.invoke("dock:badge", text),
   selftestRenderComplete: () => ipcRenderer.send("selftest:render-complete"),
 });

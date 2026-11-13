@@ -132,11 +132,43 @@ async function probeEnvHealth() {
 function deployVerdict(deployment, staleDays) {
   if (!deployment) return { cls: "none", ico: "·", label: t("Sin despliegues") };
   const days = deployment.createdAt ? (Date.now() - new Date(deployment.createdAt).getTime()) / 86400000 : 0;
-  if (deployment.createdAt && days > staleDays) return { cls: "stale", ico: "✓", label: t("Desplegado hace mucho") };
-  return { cls: "ok", ico: "✓", label: t("Desplegado correctamente") };
+  if (deployment.createdAt && days > staleDays) return { cls: "stale", ico: icon("check"), label: t("Desplegado hace mucho") };
+  return { cls: "ok", ico: icon("check"), label: t("Desplegado correctamente") };
 }
 
-const HEALTH_ICO = { up: "●", unknown: "◍", down: "○" };
+// Slot de dev (tier development): réplica de `isDevBusy` de delivery-flow (scripts/dev-slot.cjs), que es
+// quien de verdad bloquea: mientras esto diga "ocupado", el ▶ aprobar-para-probar de otra MR falla. Se
+// libera cuando QA valida (pipeline en success tras validar-qa-para-mergear), la MR pasa a Draft, se
+// mergea o se cierra. Si la regla cambia allí, cambia aquí.
+function devSlotVerdict(slot) {
+  const mr = slot.mr;
+  if (!mr) return { busy: false, reason: t("sin MR abierta") };
+  if (mr.state === "merged") return { busy: false, reason: t("MR fusionada") };
+  if (mr.state !== "opened") return { busy: false, reason: t("MR cerrada") };
+  if (mr.draft) return { busy: false, reason: t("MR en Draft") };
+  if (!mr.pipeline) return { busy: false, reason: t("MR sin pipeline") };
+  if (mr.pipeline === "success") return { busy: false, reason: t("validada por QA") };
+  return { busy: true, reason: t("pendiente de QA (pipeline {status})", { status: mr.pipeline }) };
+}
+
+function devSlotLinksHtml(slot) {
+  const link = (url, ico, text, title) =>
+    `<button class="env-link" data-url="${esc(url)}" title="${esc(title)}">${icon(ico)}${esc(text)}</button>`;
+  const links = [
+    slot.mr && link(slot.mr.url, "git-pull-request", `!${slot.mr.iid}`, slot.mr.title),
+    slot.task && link(slot.task.url, "square-check", `#${slot.task.iid}`, slot.task.title),
+    slot.epic && link(slot.epic.url, "layers", `Epic #${slot.epic.iid}`, slot.epic.title),
+  ].filter(Boolean);
+  return links.length ? `<div class="env-links">${links.join("")}</div>` : "";
+}
+
+// Función y no mapa constante: icon() se llama al pintar, no al cargar, porque test-env-mirror.js
+// evalúa este fichero en un vm sin icons.js.
+function healthIcon(status) {
+  if (status === "up") return icon("circle-check");
+  if (status === "unknown") return icon("circle-question-mark");
+  return icon("circle-x");
+}
 
 // Punto de salud (capa 2). Sin URL no pintamos nada: mejor un hueco que un icono gris que se
 // confunda con "caído".
@@ -144,12 +176,12 @@ function healthDotHtml(path, env) {
   if (!env.externalUrl) return "";
   const h = state.environments.health.get(`${path}|${env.name}`);
   if (!h) {
-    return `<span class="env-health probing" title="${t("Comprobando…")}">◌</span>`;
+    return `<span class="env-health probing" title="${t("Comprobando…")}">${icon("loader-circle", "spin")}</span>`;
   }
   const detail = [h.httpStatus ? `HTTP ${h.httpStatus}` : "", h.ms != null ? `${h.ms} ms` : "", h.note || ""]
     .filter(Boolean)
     .join(" · ");
-  return `<span class="env-health ${esc(h.status)}" title="${esc(`${env.externalUrl} — ${detail}`)}">${HEALTH_ICO[h.status] || "○"}</span>`;
+  return `<span class="env-health ${esc(h.status)}" title="${esc(`${env.externalUrl} — ${detail}`)}">${healthIcon(h.status)}</span>`;
 }
 
 // Entornos espejo (config `environments.mirrors`): un entorno que no despliega nada por su cuenta
@@ -164,14 +196,23 @@ function mirrored(env, envs, sourceName) {
 }
 
 function envCellHtml(path, env, staleDays) {
-  const v = deployVerdict(env.deployment, staleDays);
+  const slot = env.devSlot;
+  const sv = slot && devSlotVerdict(slot);
+  // En dev manda el candado (¿quién lo tiene?), no lo rancio: dev cambia de manos cada pocos días.
+  const v = sv
+    ? sv.busy
+      ? { cls: "busy", ico: icon("lock"), label: `${t("Dev ocupado")}: ${sv.reason}` }
+      : { cls: "free", ico: icon("lock-open"), label: `${t("Dev libre")}: ${sv.reason}` }
+    : deployVerdict(env.deployment, staleDays);
   const d = env.deployment;
-  const ref = d?.ref ? `<code class="env-ref">${esc(d.ref)}</code>` : `<span class="env-ref muted">—</span>`;
+  const refText = slot?.branch || d?.ref;
+  const ref = refText ? `<code class="env-ref">${esc(refText)}</code>` : `<span class="env-ref muted">—</span>`;
   const when = d?.createdAt ? timeAgo(d.createdAt) : "";
   const tip = [
     v.label,
+    slot?.mr ? `!${slot.mr.iid} ${slot.mr.title}${slot.mr.author ? ` (${slot.mr.author})` : ""}` : "",
     env.mirrorOf ? t("mismo despliegue que {env}", { env: env.mirrorOf }) : "",
-    d?.ref ? `${t("ref")}: ${d.ref}` : "",
+    refText ? `${t("ref")}: ${refText}` : "",
     d?.user ? `${t("por")} ${d.user}` : "",
     d?.sha || "",
   ]
@@ -185,10 +226,11 @@ function envCellHtml(path, env, staleDays) {
       <span class="env-box-top"><span class="env-ico">${v.ico}</span>${ref}</span>
       <span class="env-box-bot">
         <span class="env-when">${esc(when)}</span>
-        ${env.mirrorOf ? `<span class="env-mirror">↔ ${esc(env.mirrorOf)}</span>` : ""}
+        ${env.mirrorOf ? `<span class="env-mirror">${icon("arrow-left-right")} ${esc(env.mirrorOf)}</span>` : ""}
         ${healthDotHtml(path, env)}
       </span>
     </button>
+    ${slot ? devSlotLinksHtml(slot) : ""}
   </td>`;
 }
 
@@ -265,15 +307,17 @@ function renderEnvironments() {
       </details>
       <div class="env-bar">
         <span class="env-legend">
-          <span class="env-key ok">✓</span> ${t("desplegado")}
-          <span class="env-key stale">✓</span> ${t("rancio")}
+          <span class="env-key ok">${icon("check")}</span> ${t("desplegado")}
+          <span class="env-key stale">${icon("check")}</span> ${t("rancio")}
+          <span class="env-key busy">${icon("lock")}</span> ${t("dev ocupado")}
+          <span class="env-key free">${icon("lock-open")}</span> ${t("dev libre")}
           <span class="env-sep">·</span>
-          <span class="env-health up">●</span> ${t("responde")}
-          <span class="env-health unknown">◍</span> ${t("sin verificar")}
-          <span class="env-health down">○</span> ${t("caído")}
+          <span class="env-health up">${healthIcon("up")}</span> ${t("responde")}
+          <span class="env-health unknown">${healthIcon("unknown")}</span> ${t("sin verificar")}
+          <span class="env-health down">${healthIcon("down")}</span> ${t("caído")}
         </span>
         ${e.probing ? `<span class="muted">${t("Comprobando salud…")}</span>` : ""}
-        <button id="env-refresh" class="icon-btn" title="${t("Refrescar")}">⟳</button>
+        <button id="env-refresh" class="icon-btn" title="${t("Refrescar")}">${icon("refresh-cw")}</button>
       </div>
     </div>
     ${table}`;
@@ -292,7 +336,7 @@ function renderEnvironments() {
       refreshEnvData();
     }),
   );
-  list.querySelectorAll(".env-box[data-url]").forEach((btn) =>
+  list.querySelectorAll(".env-box[data-url], .env-link[data-url]").forEach((btn) =>
     btn.addEventListener("click", () => window.monstro.openExternal(btn.dataset.url)),
   );
   $("#env-refresh")?.addEventListener("click", refreshEnvData);

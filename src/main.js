@@ -3,7 +3,7 @@
 const path = require("path");
 const fs = require("fs");
 const os = require("os");
-const { app, BrowserWindow, ipcMain, shell, nativeTheme, Notification, dialog } = require("electron");
+const { app, BrowserWindow, ipcMain, shell, nativeTheme, Notification, dialog, screen } = require("electron");
 const agents = require("./agents");
 const ai = require("./ai");
 const config = require("./config");
@@ -26,18 +26,24 @@ const SELFTEST_ROUTE = (process.argv.find((a) => a.startsWith("--selftest-route=
 const SELFTEST_TIMEOUT_MS =
   SELFTEST_ROUTE === "milestones-summary"
     ? 240000
-    : SELFTEST_ROUTE.startsWith("releases") || SELFTEST_ROUTE.startsWith("local") || SELFTEST_ROUTE === "entornos"
+    : SELFTEST_ROUTE.startsWith("releases") || SELFTEST_ROUTE.startsWith("local") || SELFTEST_ROUTE === "entornos" || SELFTEST_ROUTE === "pruebas" || SELFTEST_ROUTE.startsWith("validacion")
       ? 60000
       : 20000;
 
 let win = null;
 
 function createWindow() {
+  // Media pantalla (mitad de ancho y de alto del área útil) y centrada; en pantallas pequeñas mandan
+  // los mínimos. El selftest se queda en 1280×820 para que las capturas salgan siempre iguales.
+  const MIN_WIDTH = 980;
+  const MIN_HEIGHT = 600;
+  const { width: screenWidth, height: screenHeight } = screen.getPrimaryDisplay().workAreaSize;
   win = new BrowserWindow({
-    width: 1280,
-    height: 820,
-    minWidth: 980,
-    minHeight: 600,
+    width: SELFTEST ? 1280 : Math.max(MIN_WIDTH, Math.round(screenWidth / 2)),
+    height: SELFTEST ? 820 : Math.max(MIN_HEIGHT, Math.round(screenHeight / 2)),
+    minWidth: MIN_WIDTH,
+    minHeight: MIN_HEIGHT,
+    center: true,
     title: "Monstro",
     // hiddenInset + traffic lights son solo macOS. En Windows/Linux dejamos el marco nativo
     // (con sus botones minimizar/maximizar/cerrar); si no, la ventana se quedaría sin controles.
@@ -153,8 +159,13 @@ function wireIpc() {
   require("./ipc/milestones").register(ctx);
   require("./ipc/releases").register(ctx);
   require("./ipc/env").register(ctx);
+  require("./ipc/validation").register(ctx);
+  require("./ipc/pruebas").register(ctx);
+  require("./ipc/cognito").register(ctx);
   require("./ipc/mail").register(ctx);
   require("./ipc/system").register(ctx);
+  require("./ipc/sessions").register(ctx);
+  require("./ipc/local-run").register(ctx);
 }
 
 function wireSelftest() {

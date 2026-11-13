@@ -76,15 +76,19 @@ const state = {
   // Vista de Entornos (solo GitLab): matriz proyecto × entorno. `data` = path de proyecto → entornos
   // (capa 1, GitLab). `health` = "path|entorno" → resultado de la sonda HTTP (capa 2, bajo demanda).
   environments: { projects: [], selected: new Set(), seeded: false, loading: false, data: new Map(), health: new Map(), probing: false },
+  // Tablero de Validación (solo GitLab): tarjetas (tarea + sus MRs) con su columna; `selected` = key de la tarjeta.
+  validation: { cards: null, errors: [], loading: false, selected: null, mode: "popover", tab: null },
+  // Sección Pruebas (solo GitLab): tareas por probar con su pipeline; `busy` = ids de job con una acción en curso.
+  pruebas: { tasks: null, errors: [], labels: [], loading: false, progress: null, busy: new Set(), labelFilter: [] },
+  cognito: { profiles: [], pools: [], poolId: null, q: "", users: null, selected: null, user: null, userError: null, error: null, loading: false },
   prSnapshot: null, // nº → {reviewDecision, checks, reviewMe} para detectar cambios y notificar
   cursor: -1, // selección con teclado (j/k) en la lista
   draftKeys: new Set(), // "owner/repo#n" con borradores guardados → badge 📝 en la lista
-  aiGenerating: null, // nº de PR con review IA en curso → el botón persiste en loading entre pestañas
-  aiStep: "", // qué está mirando el agente ahora mismo ("Leyendo src/foo.js"), en el botón
-  aiSteps: [], // historial de pasos de la review en curso, para el modal de progreso
-  aiRunLabel: "", // "modelo · esfuerzo" de la review en curso, en la cabecera del modal
   draftNavIndex: -1, // navegación ↑↓ entre borradores
   editingDraftId: null, // borrador en edición → su tarjeta se pinta como editor
+  editingDraftNoteId: null, // draft note de GitLab en edición (su id)
+  openFiles: null, // Set de ficheros desplegados en Cambios (null = los 6 primeros)
+  commentNav: null, // último salto de las flechas ↑↓ de Cambios: {index, scrollTop}
 };
 
 const $ = (sel) => document.querySelector(sel);
@@ -93,10 +97,12 @@ const detailPane = $("#detail-pane");
 const detailContent = $("#detail-content");
 
 /* ============ utilidades ============ */
+// También las comillas: casi todo acaba en atributos (title="…", data-key="…") y una " de un transcript o de
+// GitLab los cerraría. innerHTML de un nodo de texto solo escapa & < >.
 function esc(text) {
   const div = document.createElement("div");
   div.textContent = text ?? "";
-  return div.innerHTML;
+  return div.innerHTML.replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 }
 
 /* ============ proveedor (GitHub | GitLab) ============ */
@@ -109,18 +115,23 @@ const repoPlaceholder = () => (isGitlab() ? "group/subgroup/project" : "owner/re
 const BRANCH_RE = /^[\w./-]{1,200}$/;
 
 /* ============ apartados del menú (configurables: onboarding + Ajustes) ============ */
-// Única fuente de verdad de las secciones del sidebar: clave → cabecera + sus buckets + si es solo
-// GitLab. El onboarding pregunta cuáles incluir; config.sections (array) las habilita. null = todas.
+// Única fuente de verdad de las secciones del sidebar, en orden de menú: clave → navId (el <div> que
+// envuelve sus buckets en index.html) + si es solo GitLab. El onboarding pregunta cuáles incluir;
+// config.sections (array) las habilita. null = todas. prs no lleva envoltorio: su navId es el propio
+// bucket "Merge requests". Los grupos visuales (.nav-group) no son secciones: no se configuran.
 const MENU_SECTIONS = {
-  prs:        { label: "Pull requests",      icon: "🔀", navId: "nav-prs-section",        buckets: ['[data-bucket="open"]', '[data-bucket="mine"]', '[data-bucket="review"]', '[data-bucket="draft"]'], gitlabOnly: false },
-  historial:  { label: "Historial",          icon: "🗂️", navId: "nav-historial-section",  buckets: ['[data-bucket="merged"]', '[data-bucket="closed"]'], gitlabOnly: false },
-  historico:  { label: "Histórico (grafo)",  icon: "🕸️", navId: "nav-repo-section",       buckets: ["#bucket-history"], gitlabOnly: false },
-  milestones: { label: "Tareas por persona", icon: "👥", navId: "nav-milestones-section", buckets: ["#bucket-milestones", "#bucket-milestones-summary"], gitlabOnly: true },
-  soporte:    { label: "Soporte",            icon: "🛟", navId: "nav-support-section",    buckets: ["#bucket-support", "#bucket-ops"], gitlabOnly: true },
-  releases:   { label: "Releases",           icon: "🚀", navId: "nav-releases-section",   buckets: ["#bucket-releases", "#bucket-releases-publish", "#bucket-releases-pipelines"], gitlabOnly: true },
-  entornos:   { label: "Entornos",           icon: "🌡️", navId: "nav-entornos-section",   buckets: ["#bucket-entornos"], gitlabOnly: true },
-  local:      { label: "Trabajo local",      icon: "💻", navId: "nav-local-section",      buckets: ["#bucket-local-empezar", "#bucket-local-crear", "#bucket-local-vincular", "#bucket-local-historico"], gitlabOnly: true },
-  propuestas: { label: "Propuestas",         icon: "📥", navId: "nav-propuestas-section", buckets: ["#bucket-propuestas"], gitlabOnly: true },
+  prs:        { label: "Merge requests",     icon: "git-pull-request", navId: "nav-prs-section",        gitlabOnly: false },
+  validacion: { label: "Validación",         icon: "badge-check",      navId: "nav-validacion-section", gitlabOnly: true },
+  pruebas:    { label: "Pruebas",            icon: "flask-conical",    navId: "nav-pruebas-section",    gitlabOnly: true },
+  historial:  { label: "Historial",          icon: "history",          navId: "nav-historial-section",  gitlabOnly: false },
+  historico:  { label: "Histórico (grafo)",  icon: "git-graph",        navId: "nav-repo-section",       gitlabOnly: false },
+  local:      { label: "Trabajo local",      icon: "chart-bar",        navId: "nav-local-section",      gitlabOnly: true },
+  milestones: { label: "Tareas por persona", icon: "signpost",         navId: "nav-milestones-section", gitlabOnly: true },
+  propuestas: { label: "Propuestas",         icon: "inbox",            navId: "nav-propuestas-section", gitlabOnly: true },
+  releases:   { label: "Releases",           icon: "git-branch",       navId: "nav-releases-section",   gitlabOnly: true },
+  entornos:   { label: "Entornos",           icon: "thermometer",      navId: "nav-entornos-section",   gitlabOnly: true },
+  soporte:    { label: "Soporte",            icon: "activity",         navId: "nav-support-section",    gitlabOnly: true },
+  usuarios:   { label: "Usuarios (Cognito)", icon: "users",            navId: "nav-usuarios-section",   gitlabOnly: false },
 };
 
 // Claves de sección válidas para el proveedor actual, en orden de menú (las GitLab-only se caen en GitHub).
@@ -139,53 +150,12 @@ function sectionEnabled(key) {
 // Aplica la visibilidad de TODO el menú a la vez: por proveedor (GitLab-only) + por elección del usuario.
 function applyMenuVisibility() {
   for (const [key, sec] of Object.entries(MENU_SECTIONS)) {
-    const show = sectionEnabled(key);
-    const els = [document.getElementById(sec.navId), ...sec.buckets.map((s) => document.querySelector(s))];
-    els.forEach((el) => el && el.classList.toggle("hidden", !show));
+    document.getElementById(sec.navId)?.classList.toggle("hidden", !sectionEnabled(key));
   }
-}
-
-/* ============ plegado de secciones del sidebar (accesibilidad + orden) ============ */
-const SIDEBAR_COLLAPSE_KEY = "monstro:sidebar-collapsed";
-
-function loadCollapsedSections() {
-  try {
-    return new Set(JSON.parse(localStorage.getItem(SIDEBAR_COLLAPSE_KEY) || "[]"));
-  } catch {
-    return new Set();
-  }
-}
-
-function saveCollapsedSections(set) {
-  localStorage.setItem(SIDEBAR_COLLAPSE_KEY, JSON.stringify([...set]));
-}
-
-const collapsedSections = loadCollapsedSections();
-
-// Refleja collapsedSections en el DOM: clase en el grupo + aria-expanded en su cabecera.
-function applySidebarCollapse() {
-  for (const key of Object.keys(MENU_SECTIONS)) {
-    const btn = document.getElementById(MENU_SECTIONS[key].navId);
-    const group = btn?.closest(".nav-group");
-    if (!group) continue;
-    const collapsed = collapsedSections.has(key);
-    group.classList.toggle("collapsed", collapsed);
-    btn.setAttribute("aria-expanded", String(!collapsed));
-  }
-}
-
-function toggleSidebarSection(key) {
-  if (collapsedSections.has(key)) collapsedSections.delete(key);
-  else collapsedSections.add(key);
-  saveCollapsedSections(collapsedSections);
-  applySidebarCollapse();
-}
-
-// Un solo listener por cabecera de sección, generado desde MENU_SECTIONS (fuente única de verdad).
-function wireSidebarCollapse() {
-  for (const key of Object.keys(MENU_SECTIONS)) {
-    document.getElementById(MENU_SECTIONS[key].navId)?.addEventListener("click", () => toggleSidebarSection(key));
-  }
+  // La cabecera de un grupo (Código, Entrega…) solo se ve si le queda alguna sección visible dentro.
+  document.querySelectorAll(".nav-group").forEach((group) =>
+    group.classList.toggle("hidden", !group.querySelector(':scope > [id$="-section"]:not(.hidden)')),
+  );
 }
 
 function timeAgo(iso) {
@@ -201,12 +171,16 @@ function timeAgo(iso) {
   return t("ahora");
 }
 
+const TOAST_ICON = { ok: "circle-check", err: "circle-x", warn: "triangle-alert" };
+
 // Devuelve el elemento: `sticky` (para progreso en vivo, p.ej. la descarga de un update, que
 // puede durar más que el timeout) no se auto-borra y lo quita quien lo creó.
 function toast(message, kind = "", onClick = null, sticky = false) {
   const el = document.createElement("div");
   el.className = `toast ${kind}`;
-  el.textContent = message;
+  // El icono (por tipo) va como HTML; el mensaje, siempre como texto.
+  el.innerHTML = TOAST_ICON[kind] ? icon(TOAST_ICON[kind]) : "";
+  el.append(message);
   if (onClick) {
     el.style.cursor = "pointer";
     el.addEventListener("click", onClick);
@@ -216,9 +190,19 @@ function toast(message, kind = "", onClick = null, sticky = false) {
   return el;
 }
 
-function copyText(text) {
+// Badge del dock = lo que pide tu atención: PRs que esperan tu review (poll.js) + agentes que te esperan
+// (sessions.js). Cada parte pone su número y el badge enseña la suma.
+const dockBadgeParts = { reviews: 0, agents: 0 };
+function setDockBadge(part, count) {
+  dockBadgeParts[part] = count;
+  const total = dockBadgeParts.reviews + dockBadgeParts.agents;
+  window.monstro.dockBadge(total ? String(total) : "");
+}
+
+// `message`: el toast de confirmación, si hace falta decir algo más que "Copiado".
+function copyText(text, message = t("Copiado")) {
   navigator.clipboard?.writeText(text).then(
-    () => toast(t("Copiado"), "ok"),
+    () => toast(message, "ok"),
     () => {
       const ta = document.createElement("textarea");
       ta.value = text;
@@ -226,7 +210,7 @@ function copyText(text) {
       ta.select();
       document.execCommand("copy");
       ta.remove();
-      toast(t("Copiado"), "ok");
+      toast(message, "ok");
     },
   );
 }

@@ -4,7 +4,7 @@
 // Parte de la implementación del proveedor GitLab — ver src/gitlab.js para la interfaz pública.
 
 const config = require("../config");
-const { api, apiAll, chunk, fetchAvatarDataUri, graphql, mapLimit, mdToSafeHtml, proj, viewer } = require("./core");
+const { api, apiAll, chunk, fetchAvatarDataUri, graphql, mapLimit, mapUser, mdToSafeHtml, proj, viewer } = require("./core");
 
 function milestonesGroup() {
   const cfg = config.load();
@@ -34,20 +34,22 @@ function mapAssignee(u) {
 
 // Con with_labels_details=true, `labels` llega como objetos {name,color,text_color}.
 
-function mapIssue(issue) {
+async function mapIssue(issue) {
   const labels = (issue.labels || []).map((l) =>
     typeof l === "string" ? { name: l, color: null, textColor: null } : { name: l.name, color: l.color, textColor: l.text_color },
   );
   const description = issue.description || "";
+  // references.full = "group/project#iid"; nos quedamos con el path del proyecto (también resuelve
+  // las capturas de pantalla pegadas en la descripción).
+  const projectPath = (issue.references?.full || "").replace(/#\d+$/, "");
   return {
     id: issue.id, // id global (= WorkItem id en GraphQL), para resolver la jerarquía padre
     iid: issue.iid,
     projectId: issue.project_id,
     issueType: issue.issue_type, // "issue" | "task" (work item) | ...
-    // references.full = "group/project#iid"; nos quedamos con el path del proyecto.
-    projectPath: (issue.references?.full || "").replace(/#\d+$/, ""),
+    projectPath,
     title: issue.title,
-    descriptionHtml: mdToSafeHtml(description), // markdown crudo -> HTML seguro (no inyectar sin escapar)
+    descriptionHtml: await mdToSafeHtml(description, projectPath), // markdown crudo -> HTML seguro (no inyectar sin escapar)
     hasDescription: Boolean(description.trim()),
     state: issue.state, // "opened" | "closed"
     webUrl: issue.web_url,
@@ -77,7 +79,7 @@ async function milestoneIssues(milestoneTitle, { includeClosed = false } = {}) {
   const mt = encodeURIComponent(milestoneTitle);
   const state = includeClosed ? "all" : "opened";
   const issues = await apiAll(`/groups/${enc}/issues?milestone=${mt}&state=${state}&with_labels_details=true`);
-  const mapped = issues.map(mapIssue);
+  const mapped = await Promise.all(issues.map(mapIssue));
   for (const iss of mapped) iss.isEpic = isEpicUrl(iss.webUrl);
   // Botones de MR (solo de cierre, batch rápido) para las issues normales ABIERTAS. Las cerradas
   // se saltan en la carga (rendimiento) y se piden bajo demanda al activar "Mostrar cerradas"
@@ -110,7 +112,7 @@ async function milestoneIssues(milestoneTitle, { includeClosed = false } = {}) {
 async function projectIssues(projectPath) {
   const enc = proj(projectPath);
   const issues = await apiAll(`/projects/${enc}/issues?state=all&with_labels_details=true&scope=all`);
-  return issues.map(mapIssue);
+  return Promise.all(issues.map(mapIssue));
 }
 
 // MRs (cierre + referenciadas) de un conjunto de work items por id, bajo demanda. Para las issues
@@ -258,6 +260,43 @@ async function workItemChildren(gids) {
   return out;
 }
 
+// Nota (comentario) en una issue. addIssueComment (prs.js) es de MRs: /merge_requests/:iid/notes.
+
+async function addIssueNote(projectPath, iid, body) {
+  return api("POST", `/projects/${proj(projectPath)}/issues/${iid}/notes`, { body });
+}
+
+// MRs de una tarea o de una Epic a partir de su proyecto + iid, para lanzar agentes sobre ellas (panel
+// Agents). De una Epic, también las de sus hijas por jerarquía Y las de sus enlazadas: "Crear tarea" de
+// Monstro enlaza las tareas con /links en vez de colgarlas como hijas. Devuelve [{mrUrl, title, state,
+// taskUrl}] sin repetir y abiertas primero; taskUrl es la tarea por la que se llegó a la MR.
+
+async function taskMergeRequests(projectPath, iid) {
+  const issue = await api("GET", `/projects/${proj(projectPath)}/issues/${iid}`);
+  const gidOf = (id) => `gid://gitlab/WorkItem/${id}`;
+  const tasks = [{ gid: gidOf(issue.id), webUrl: issue.web_url }];
+  if (isEpicUrl(issue.web_url)) {
+    const [children, links] = await Promise.all([
+      workItemChildren([tasks[0].gid]).then((map) => map.get(tasks[0].gid) || []),
+      api("GET", `/projects/${proj(projectPath)}/issues/${iid}/links`).catch(() => []),
+    ]);
+    for (const c of children) tasks.push({ gid: c.gid, webUrl: c.webUrl });
+    for (const l of Array.isArray(links) ? links : []) tasks.push({ gid: gidOf(l.id), webUrl: l.web_url });
+  }
+  const unique = [...new Map(tasks.map((t) => [t.gid, t])).values()];
+  const mrs = await developmentMRs(unique.map((t) => t.gid), { withRelated: true });
+  const seen = new Set();
+  const out = [];
+  for (const t of unique) {
+    for (const mr of mrs.get(t.gid) || []) {
+      if (seen.has(mr.webUrl)) continue;
+      seen.add(mr.webUrl);
+      out.push({ mrUrl: mr.webUrl, title: mr.title, state: mr.state, taskUrl: t.webUrl });
+    }
+  }
+  return out.sort((a, b) => (MR_RANK[a.state] ?? 9) - (MR_RANK[b.state] ?? 9));
+}
+
 // Descarga un avatar (privado, requiere token) y lo devuelve como data-URI para que el renderer
 // pueda pintarlo (las imágenes /uploads/-/system de una instancia privada dan 401 sin auth).
 
@@ -299,7 +338,7 @@ async function updateIssue(projectId, iid, patch) {
   if (patch.assigneeIds) body.assignee_ids = patch.assigneeIds.length ? patch.assigneeIds : [0];
   if (patch.stateEvent) body.state_event = patch.stateEvent; // "close" / "reopen"
   const updated = await api("PUT", `/projects/${projectId}/issues/${iid}`, body);
-  return mapIssue(updated);
+  return await mapIssue(updated);
 }
 
 // Crea una issue en un proyecto. Devuelve {iid, projectPath, url, title} (forma mínima que consume
@@ -332,6 +371,12 @@ async function mrStatus(projectPath, iid) {
 async function issueStatus(projectPath, iid) {
   const it = await api("GET", `/projects/${proj(projectPath)}/issues/${iid}`);
   return { state: it.state, closed: it.state === "closed", labels: it.labels || [] };
+}
+
+// Una issue (o epic: issue del proyecto …/epics) para la ficha del panel Agents, con el enum de GitHub.
+async function issueDetail(projectPath, iid) {
+  const it = await api("GET", `/projects/${proj(projectPath)}/issues/${iid}`);
+  return { number: it.iid, title: it.title, url: it.web_url, state: it.state === "closed" ? "CLOSED" : "OPEN", author: mapUser(it.author), updatedAt: it.updated_at };
 }
 
 // Crea una Merge Request sourceBranch -> targetBranch. squash:false y remove_source_branch:false
@@ -537,6 +582,7 @@ module.exports = {
   MR_RANK,
   SUMMARY_END,
   SUMMARY_START,
+  addIssueNote,
   closingMRs,
   collapseMilestoneEpics,
   createEpic,
@@ -547,6 +593,7 @@ module.exports = {
   groupLabels,
   groupProjects,
   isEpicUrl,
+  issueDetail,
   issueMRs,
   issueStatus,
   listMilestones,
@@ -563,6 +610,7 @@ module.exports = {
   relatedMRsOne,
   saveMilestoneSummary,
   searchGroupIssues,
+  taskMergeRequests,
   updateIssue,
   workItemChildren,
   workItemParents,

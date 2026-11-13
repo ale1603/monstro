@@ -15,8 +15,10 @@ const prs = require("./gitlab/prs");
 const issues = require("./gitlab/issues");
 const environments = require("./gitlab/environments");
 const releases = require("./gitlab/releases");
+const validation = require("./gitlab/validation");
+const pruebas = require("./gitlab/pruebas");
 
-const all = { ...core, ...prs, ...issues, ...environments, ...releases };
+const all = { ...core, ...prs, ...issues, ...environments, ...releases, ...validation, ...pruebas };
 
 module.exports = {
   resolveToken: all.resolveToken,
@@ -25,9 +27,9 @@ module.exports = {
   viewerRepos: all.viewerRepos,
   listPRs: all.listPRs,
   searchPRs: all.searchPRs,
+  mrForBranch: all.mrForBranch,
   prDetail: all.prDetail,
   mergePR: all.mergePR,
-  updateBranchRebase: all.updateBranchRebase,
   defaultBranch: all.defaultBranch,
   branchHistories: all.branchHistories,
   prFiles: all.prFiles,
@@ -36,7 +38,9 @@ module.exports = {
   addInlineComment: all.addInlineComment,
   replyToThread: all.replyToThread,
   setThreadResolved: all.setThreadResolved,
-  dismissReview: all.dismissReview,
+  updateDraftNote: all.updateDraftNote,
+  deleteDraftNote: all.deleteDraftNote,
+  publishDraftNotes: all.publishDraftNotes,
   submitReview: all.submitReview,
   createBranch: all.createBranch,
   forceUpdateBranch: all.forceUpdateBranch,
@@ -50,6 +54,8 @@ module.exports = {
   milestoneEpicChildren: all.milestoneEpicChildren,
   projectIssues: all.projectIssues,
   issueMRs: all.issueMRs,
+  taskMergeRequests: all.taskMergeRequests,
+  addIssueNote: all.addIssueNote,
   groupLabels: all.groupLabels,
   groupProjects: all.groupProjects,
   updateIssue: all.updateIssue,
@@ -59,6 +65,7 @@ module.exports = {
   createIssueLink: all.createIssueLink,
   mrStatus: all.mrStatus,
   issueStatus: all.issueStatus,
+  issueDetail: all.issueDetail,
   searchGroupIssues: all.searchGroupIssues,
   listMyTasks: all.listMyTasks,
   collapseMilestoneEpics: all.collapseMilestoneEpics,
@@ -70,6 +77,13 @@ module.exports = {
   projectEnvironments: all.projectEnvironments,
   releasePipeline: all.releasePipeline,
   playJob: all.playJob,
+  validationBoard: all.validationBoard,
+  validationAct: all.validationAct,
+  pruebasBoard: all.pruebasBoard,
+  pruebasTask: all.pruebasTask,
+  pruebasAct: all.pruebasAct,
+  pruebasNewPipeline: all.pruebasNewPipeline,
+  pruebasRunMrPipeline: all.pruebasRunMrPipeline,
   createSnippet: all.createSnippet,
   saveMilestoneSummary: all.saveMilestoneSummary,
   mergeSummaryBlock: all.mergeSummaryBlock,

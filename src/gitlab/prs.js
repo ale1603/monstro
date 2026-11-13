@@ -48,9 +48,7 @@ function mapReviews(mr, approvals) {
   const approvedBy = approvals?.approved_by || [];
   const approvedLogins = new Set(approvedBy.map((a) => a.user?.username));
   const latestReviews = {
-    // databaseId (id de usuario) sólo para que el renderer sepa que la review es "desaprobable";
-    // dismissReview en GitLab no lo usa (unapprove actúa sobre la MR, no sobre una review).
-    nodes: approvedBy.map((a) => ({ databaseId: a.user?.id || null, author: mapUser(a.user), state: "APPROVED" })),
+    nodes: approvedBy.map((a) => ({ author: mapUser(a.user), state: "APPROVED" })),
   };
   // Reviewers asignados que aún no han aprobado = revisión pendiente.
   const reviewRequests = {
@@ -147,6 +145,15 @@ async function searchPRs(repoFullNames, states) {
   return lists.flat().sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1));
 }
 
+// MR más reciente (cualquier estado) cuya rama origen es `branch`, o null. La usa el panel de sesiones.
+async function mrForBranch(repoFullName, branch) {
+  const [mr] = await api(
+    "GET",
+    `/projects/${proj(repoFullName)}/merge_requests?source_branch=${encodeURIComponent(branch)}&order_by=updated_at&per_page=1`,
+  );
+  return mr ? { iid: mr.iid, url: mr.web_url, state: mapState(mr.state) } : null;
+}
+
 async function prDetail(repoFullName, number) {
   const mr = await api("GET", `/projects/${proj(repoFullName)}/merge_requests/${number}`);
   const approvals = await api(
@@ -155,7 +162,7 @@ async function prDetail(repoFullName, number) {
   ).catch(() => null);
   const pr = mapMr(mr, approvals);
   pr.body = mr.description || "";
-  pr.bodyHTML = mdToSafeHtml(mr.description);
+  pr.bodyHTML = await mdToSafeHtml(mr.description, repoFullName);
   return pr;
 }
 
@@ -168,14 +175,6 @@ async function mergePR(repoFullName, number, { deleteBranch, isCrossRepository }
     should_remove_source_branch: removeSource,
   });
   return { merged: result.state === "merged", sha: result.merge_commit_sha, branchDeleted: removeSource };
-}
-
-/** Update branch SIEMPRE con rebase. */
-
-async function updateBranchRebase(encodedId) {
-  const { repo, iid } = decodeId(encodedId);
-  await api("PUT", `/projects/${proj(repo)}/merge_requests/${iid}/rebase`);
-  return { number: iid };
 }
 
 /* ---------- histórico (grafo de commits) ---------- */
@@ -240,7 +239,12 @@ async function prFiles(repoFullName, number) {
 
 async function prConversation(repoFullName, number) {
   const mr = await api("GET", `/projects/${proj(repoFullName)}/merge_requests/${number}`);
-  const discussions = await apiAll(`/projects/${proj(repoFullName)}/merge_requests/${number}/discussions`);
+  const [discussions, draftNotes] = await Promise.all([
+    apiAll(`/projects/${proj(repoFullName)}/merge_requests/${number}/discussions`),
+    // Borradores de review (draft notes, p. ej. los de la skill mr-review-gitlab): solo los ve el dueño
+    // del token hasta publicarlos. Si la instancia no los soporta, sin ellos.
+    apiAll(`/projects/${proj(repoFullName)}/merge_requests/${number}/draft_notes`).catch(() => []),
+  ]);
   const comments = [];
   const reviewThreads = [];
   for (const d of discussions) {
@@ -261,24 +265,48 @@ async function prConversation(repoFullName, number) {
         isOutdated: false,
         // databaseId = id de la DISCUSSION (lo que necesita el reply de GitLab).
         comments: {
-          nodes: notes.map((n) => ({
+          nodes: await Promise.all(notes.map(async (n) => ({
             databaseId: d.id,
             author: mapUser(n.author),
-            bodyHTML: mdToSafeHtml(n.body),
+            bodyHTML: await mdToSafeHtml(n.body, repoFullName),
             createdAt: n.created_at,
-          })),
+          }))),
         },
       });
     } else {
       for (const n of notes) {
-        comments.push({ author: mapUser(n.author), bodyHTML: mdToSafeHtml(n.body), createdAt: n.created_at });
+        comments.push({ author: mapUser(n.author), bodyHTML: await mdToSafeHtml(n.body, repoFullName), createdAt: n.created_at });
       }
     }
+  }
+  // isPendingDraft: el renderer los pinta aparte y sin responder/resolver. Sin fichero (position_type
+  // "text", el resumen de la review) = comentario general.
+  for (const dn of draftNotes) {
+    // draftNoteId + body (markdown crudo) para editarlo desde el detalle.
+    const comment = { databaseId: null, author: null, bodyHTML: await mdToSafeHtml(dn.note, repoFullName), createdAt: null, isPendingDraft: true, draftNoteId: dn.id, body: dn.note };
+    const pos = dn.position;
+    if (!pos?.new_path && !pos?.old_path) {
+      comments.push(comment);
+      continue;
+    }
+    reviewThreads.push({
+      id: null,
+      isPendingDraft: true,
+      viewerCanResolve: false,
+      viewerCanUnresolve: false,
+      path: pos.new_path || pos.old_path,
+      line: pos.new_line ?? pos.old_line,
+      startLine: pos.line_range?.start?.new_line ?? null,
+      isResolved: false,
+      isOutdated: false,
+      comments: { nodes: [comment] },
+    });
   }
   return {
     headRefOid: mr.diff_refs?.head_sha || mr.sha,
     comments: { totalCount: comments.length, nodes: comments },
     reviewThreads: { nodes: reviewThreads },
+    pendingDrafts: draftNotes.length,
   };
 }
 
@@ -294,10 +322,29 @@ async function setThreadResolved(threadId, resolved) {
   return api("PUT", `/projects/${m[1]}/merge_requests/${m[2]}/discussions/${m[3]}`, { resolved });
 }
 
-/** "Quitar aprobación": GitLab no tiene dismissal de reviews; equivale a unapprove de la MR. */
+/** Cambia el texto de un borrador de review (draft note). Sigue sin publicarse. */
 
-async function dismissReview(repoFullName, number) {
-  return api("POST", `/projects/${proj(repoFullName)}/merge_requests/${number}/unapprove`);
+async function updateDraftNote(repoFullName, number, draftNoteId, body) {
+  const path = `/projects/${proj(repoFullName)}/merge_requests/${number}/draft_notes/${draftNoteId}`;
+  // El PUT hace `update!(note:, position: params[:position])`: sin position, GitLab la BORRA y el
+  // borrador se sale de su línea (pasa a comentario general). Se reenvía la que tiene, sin nulos.
+  const { position } = await api("GET", path);
+  const anchored = position?.new_path || position?.old_path;
+  const keys = ["base_sha", "start_sha", "head_sha", "position_type", "new_path", "new_line", "old_path", "old_line", "line_range"];
+  const kept = anchored ? Object.fromEntries(keys.filter((k) => position[k] != null).map((k) => [k, position[k]])) : undefined;
+  return api("PUT", path, { note: body, position: kept });
+}
+
+/** Borra un borrador de review (draft note). GitLab no tiene papelera: no se puede deshacer. */
+
+async function deleteDraftNote(repoFullName, number, draftNoteId) {
+  return api("DELETE", `/projects/${proj(repoFullName)}/merge_requests/${number}/draft_notes/${draftNoteId}`);
+}
+
+/** Publica de golpe TODOS tus borradores de review de la MR (bulk_publish). Irreversible: el equipo los ve. */
+
+async function publishDraftNotes(repoFullName, number) {
+  return api("POST", `/projects/${proj(repoFullName)}/merge_requests/${number}/draft_notes/bulk_publish`);
 }
 
 async function diffRefs(repoFullName, number) {
@@ -475,8 +522,8 @@ module.exports = {
   createBranch,
   createMergeRequest,
   defaultBranch,
+  deleteDraftNote,
   diffRefs,
-  dismissReview,
   forceUpdateBranch,
   listPRs,
   mapLabels,
@@ -486,16 +533,18 @@ module.exports = {
   mapState,
   mergePR,
   mrCommits,
+  mrForBranch,
   prConversation,
   prDetail,
   prFiles,
   prNodeId,
   projectPathFromRefs,
+  publishDraftNotes,
   replyToThread,
   revertPullRequest,
   searchPRs,
   setPrDraft,
   setThreadResolved,
   submitReview,
-  updateBranchRebase,
+  updateDraftNote,
 };
